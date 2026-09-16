@@ -6,11 +6,14 @@ from bot.db import get_pool
 router = Router()
 
 
-@router.message(CommandStart(deep_link=True))
+@router.message(CommandStart())
 async def start_with_ref(message: Message, command: CommandObject):
     payload = command.args or ""
     if not payload.startswith("c_"):
-        await message.answer("Привет! Активной ссылки на конкурс не нашёл.")
+        await message.answer(
+            "Привет! Чтобы принять участие в конкурсе, перейди по реферальной ссылке, "
+            "которую тебе прислали, или дождись анонса конкурса."
+        )
         return
 
     ref_code = payload[2:]

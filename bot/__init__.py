@@ -1,15 +1,29 @@
+import asyncio
 from aiogram import Bot, Dispatcher
 from bot.config import BOT_TOKEN
 from bot.handlers import admin, user, screenshots
 
 _bot: Bot | None = None
+_bot_loop: asyncio.AbstractEventLoop | None = None
 _dp: Dispatcher | None = None
 
 
 def get_bot() -> Bot:
-    global _bot
-    if _bot is None:
+    """
+    В serverless-среде каждый вызов asyncio.run() создаёт новый event loop.
+    aiohttp-сессия внутри Bot привязывается к тому loop'у, что был активен при её
+    создании — если переиспользовать Bot из предыдущего вызова, получим
+    'Event loop is closed'. Поэтому пересоздаём Bot при смене loop'а.
+    """
+    global _bot, _bot_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _bot is None or _bot_loop is not current_loop:
         _bot = Bot(token=BOT_TOKEN)
+        _bot_loop = current_loop
     return _bot
 
 
