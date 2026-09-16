@@ -29,7 +29,7 @@ Python 3.11+, aiogram 3, Vercel (serverless, webhook-режим), Supabase (Post
 
 1. Зарегистрируйся на [cron-job.org](https://cron-job.org) (или аналог, например EasyCron).
 2. Создай задачу:
-   - URL: `https://<твой-домен>.vercel.app/api/cron_finalize`
+   - URL: `https://<твой-домен>.vercel.app/api`
    - Метод: GET
    - Периодичность: каждые 15 минут
    - Заголовок: `Authorization: Bearer <значение CRON_SECRET>`
@@ -39,8 +39,11 @@ Python 3.11+, aiogram 3, Vercel (serverless, webhook-режим), Supabase (Post
 После деплоя выполни один раз (замени значения):
 
 ```bash
-curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://<твой-домен>.vercel.app/api/webhook"
+curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://<твой-домен>.vercel.app/api"
 ```
+
+Обрати внимание: и вебхук Telegram, и крон-джоб указывают на **один и тот же URL** — `/api`.
+Они различаются HTTP-методом: Telegram всегда шлёт `POST` (апдейты), крон дергает `GET` (финализация).
 
 ## Как пользоваться
 
