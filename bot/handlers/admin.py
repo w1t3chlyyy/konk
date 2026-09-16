@@ -52,10 +52,18 @@ async def get_description(message: Message, state: FSMContext):
 
 @router.message(StateFilter(NewContest.deadline))
 async def get_deadline(message: Message, state: FSMContext):
-    try:
-        deadline = datetime.strptime(message.text.strip(), "%Y-%m-%d %H:%M")
-    except ValueError:
+    import re
+    # нормализуем: любые разделители в дате -> "-", в времени -> ":"
+    raw = message.text.strip()
+    m = re.match(r"^(\d{4})\D(\d{1,2})\D(\d{1,2})\D+(\d{1,2})\D(\d{1,2})$", raw)
+    if not m:
         await message.answer("Формат не понял, пример: 2026-10-01 18:00")
+        return
+    y, mo, d, h, mi = m.groups()
+    try:
+        deadline = datetime(int(y), int(mo), int(d), int(h), int(mi))
+    except ValueError:
+        await message.answer("Такой даты не существует, проверь и пришли ещё раз.")
         return
     await state.update_data(deadline=deadline.isoformat())
     await state.set_state(NewContest.places)
@@ -110,6 +118,7 @@ async def get_conditions(message: Message, state: FSMContext):
 
     data = await state.get_data()
     ref_code = secrets.token_urlsafe(6)
+    deadline_dt = datetime.fromisoformat(data["deadline"])
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -117,7 +126,7 @@ async def get_conditions(message: Message, state: FSMContext):
             contest = await conn.fetchrow(
                 """insert into contests (ref_code, title, description, status, deadline_at)
                    values ($1, $2, $3, 'active', $4) returning id""",
-                ref_code, data["title"], data["description"], data["deadline"],
+                ref_code, data["title"], data["description"], deadline_dt,
             )
             for p in data["places"]:
                 await conn.execute(
