@@ -2,6 +2,7 @@ import asyncio
 from aiogram import Bot, Dispatcher
 from bot.config import BOT_TOKEN
 from bot.handlers import admin, user, screenshots
+from bot.services.fsm_storage import PostgresStorage
 
 _bot: Bot | None = None
 _bot_loop: asyncio.AbstractEventLoop | None = None
@@ -30,7 +31,7 @@ def get_bot() -> Bot:
 def get_dispatcher() -> Dispatcher:
     global _dp
     if _dp is None:
-        _dp = Dispatcher()
+        _dp = Dispatcher(storage=PostgresStorage())
         # порядок важен: у admin.py уже стоит фильтр "только ADMIN_ID" на своём роутере
         _dp.include_router(admin.router)
         _dp.include_router(screenshots.router)
