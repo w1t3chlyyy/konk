@@ -1,139 +1,38 @@
-from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Router
+from aiogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
+)
 from aiogram.filters import CommandStart, CommandObject
 from bot.db import get_pool
+from bot.config import MINIAPP_URL
 
 router = Router()
 
 
 @router.message(CommandStart())
-async def start_with_ref(message: Message, command: CommandObject):
+async def start(message: Message, command: CommandObject):
     payload = command.args or ""
-    if not payload.startswith("c_"):
-        await message.answer(
-            "Привет! Чтобы принять участие в конкурсе, перейди по реферальной ссылке, "
-            "которую тебе прислали, или дождись анонса конкурса."
-        )
-        return
-
-    ref_code = payload[2:]
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        contest = await conn.fetchrow(
-            "select * from contests where ref_code = $1 and status = 'active'", ref_code
-        )
-        if not contest:
-            await message.answer("Этот конкурс уже недоступен.")
-            return
-
-        # создаём участника, если его ещё нет
-        participant = await conn.fetchrow(
-            """
-            insert into participants (contest_id, user_id, username)
-            values ($1, $2, $3)
-            on conflict (contest_id, user_id) do nothing
-            returning *
-            """,
-            contest["id"], message.from_user.id, message.from_user.username,
-        )
-        if participant is None:
-            participant = await conn.fetchrow(
-                "select * from participants where contest_id = $1 and user_id = $2",
-                contest["id"], message.from_user.id,
-            )
-
-        conditions = await conn.fetch(
-            "select * from conditions where contest_id = $1 order by sort_order", contest["id"]
-        )
-
-    await message.answer(
-        f"🎉 <b>{contest['title']}</b>\n\n{contest['description']}\n\nЧтобы участвовать, выполни условия ниже:",
-        parse_mode="HTML",
-    )
-    await send_conditions_checklist(message.bot, message.from_user.id, participant["id"], conditions)
-
-
-async def send_conditions_checklist(bot: Bot, user_id: int, participant_id: int, conditions):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        checks = {
-            row["condition_id"]: row["status"]
-            for row in await conn.fetch(
-                "select condition_id, status from condition_checks where participant_id = $1",
-                participant_id,
-            )
-        }
-
-    kb = []
-    for c in conditions:
-        status = checks.get(c["id"], "pending")
-        mark = "✅" if status == "approved" else "⬜️"
-        kb.append([InlineKeyboardButton(
-            text=f"{mark} {c['description']}",
-            callback_data=f"check:{participant_id}:{c['id']}",
-        )])
-
-    await bot.send_message(
-        user_id,
-        "Отметь выполненные условия:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
-    )
-
-
-@router.callback_query(F.data.startswith("check:"))
-async def on_condition_tap(callback: CallbackQuery):
-    _, participant_id, condition_id = callback.data.split(":")
-    participant_id, condition_id = int(participant_id), int(condition_id)
+    ref_code = payload[2:] if payload.startswith("c_") else None
 
     pool = await get_pool()
     async with pool.acquire() as conn:
-        condition = await conn.fetchrow("select * from conditions where id = $1", condition_id)
+        settings = await conn.fetchrow("select * from bot_settings order by id limit 1")
 
-        if condition["type"] == "auto_channel_sub":
-            member = await callback.bot.get_chat_member(condition["channel_id"], callback.from_user.id)
-            if member.status in ("member", "administrator", "creator"):
-                await conn.execute(
-                    """insert into condition_checks (participant_id, condition_id, status, reviewed_at)
-                       values ($1, $2, 'approved', now())
-                       on conflict (participant_id, condition_id)
-                       do update set status = 'approved', reviewed_at = now()""",
-                    participant_id, condition_id,
-                )
-                await callback.answer("Подписка подтверждена ✅")
-            else:
-                await callback.answer("Не вижу подписки — подпишись и попробуй снова ❌", show_alert=True)
-                return
-        else:
-            # manual_screenshot — просим прислать фото следующим сообщением
-            await callback.message.answer(
-                f"Пришли скриншот для условия «{condition['description']}» следующим сообщением (просто фото в чат)."
-            )
-            await conn.execute(
-                """insert into condition_checks (participant_id, condition_id, status)
-                   values ($1, $2, 'pending')
-                   on conflict (participant_id, condition_id) do nothing""",
-                participant_id, condition_id,
-            )
-            await callback.answer()
-            return
+    miniapp_url = f"{MINIAPP_URL}/"
+    if ref_code:
+        miniapp_url += f"?ref={ref_code}"
 
-    await refresh_progress(callback, participant_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎉 Открыть", web_app=WebAppInfo(url=miniapp_url)),
+    ]])
 
+    text = settings["welcome_text"] if settings else "Добро пожаловать! 🎉"
+    media_id = settings["welcome_media_file_id"] if settings else None
+    media_type = settings["welcome_media_type"] if settings else None
 
-async def refresh_progress(callback: CallbackQuery, participant_id: int):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        participant = await conn.fetchrow("select * from participants where id = $1", participant_id)
-        total = await conn.fetchval(
-            "select count(*) from conditions where contest_id = $1", participant["contest_id"]
-        )
-        approved = await conn.fetchval(
-            "select count(*) from condition_checks where participant_id = $1 and status = 'approved'",
-            participant_id,
-        )
-        if approved == total and participant["status"] != "confirmed":
-            await conn.execute(
-                "update participants set status = 'confirmed', confirmed_at = now() where id = $1",
-                participant_id,
-            )
-            await callback.message.answer("Все условия выполнены — вы участвуете в конкурсе! 🎉")
+    if media_id and media_type == "photo":
+        await message.answer_photo(media_id, caption=text, reply_markup=kb)
+    elif media_id and media_type == "video":
+        await message.answer_video(media_id, caption=text, reply_markup=kb)
+    else:
+        await message.answer(text, reply_markup=kb)

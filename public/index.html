@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Конкурсы</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --blue: #2f6fed;
+    --blue-light: #eaf1ff;
+    --text: #14213d;
+    --muted: #7c8aa5;
+    --bg: #ffffff;
+    --border: #e7ecf5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px 16px 40px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 24px 0 12px; }
+  p { color: var(--muted); font-size: 14px; line-height: 1.5; }
+  .card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+  .btn {
+    display: block;
+    width: 100%;
+    background: var(--blue);
+    color: #fff;
+    border: none;
+    border-radius: 12px;
+    padding: 14px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 8px;
+  }
+  .btn:disabled { opacity: .5; }
+  .btn.secondary { background: var(--blue-light); color: var(--blue); }
+  .condition {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 8px;
+    cursor: pointer;
+  }
+  .condition .mark {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: #fff; flex-shrink: 0;
+  }
+  .condition.approved .mark { background: var(--blue); border-color: var(--blue); }
+  .banner {
+    background: var(--blue-light);
+    color: var(--blue);
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+  input, textarea, select {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 14px;
+    margin-bottom: 10px;
+    font-family: inherit;
+  }
+  label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 4px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .muted-link { color: var(--blue); font-size: 13px; background: none; border: none; padding: 8px 0; cursor: pointer; }
+  .list-item { display: flex; justify-content: space-between; align-items: center; }
+  .list-item .title { font-weight: 600; font-size: 14px; }
+  .list-item .meta { color: var(--muted); font-size: 12px; }
+  #app { max-width: 480px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="app"><p>Загрузка…</p></div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const initData = tg?.initData || "";
+const params = new URLSearchParams(location.search);
+const app = document.getElementById("app");
+
+async function api(action, { method = "GET", body, query } = {}) {
+  const qs = new URLSearchParams({ action, ...(query || {}) });
+  if (method === "GET") qs.set("init_data", initData);
+  const url = `/api?${qs.toString()}`;
+  const res = await fetch(url, {
+    method,
+    headers: method === "POST" ? { "Content-Type": "application/json" } : undefined,
+    body: method === "POST" ? JSON.stringify({ init_data: initData, ...(body || {}) }) : undefined,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "error");
+  return data;
+}
+
+function render(html) { app.innerHTML = html; }
+
+// ===== Экран участника =====
+async function renderContest(ref) {
+  render("<p>Загрузка конкурса…</p>");
+  let data;
+  try { data = await api("contest", { query: { ref } }); }
+  catch (e) { render(`<div class="card"><p>Не удалось загрузить конкурс: ${e.message}</p></div>`); return; }
+
+  const { contest, conditions, status, participant_id } = data;
+  const confirmed = status === "confirmed";
+
+  render(`
+    <h1>🎉 ${contest.title}</h1>
+    <p>${contest.description || ""}</p>
+    ${confirmed ? `<div class="banner">Вы участвуете в конкурсе! Дождитесь подведения итогов.</div>` : ""}
+    <h2>Условия участия</h2>
+    <div id="conds"></div>
+  `);
+
+  const condsEl = document.getElementById("conds");
+  conditions.forEach(c => {
+    const el = document.createElement("div");
+    el.className = "condition" + (c.status === "approved" ? " approved" : "");
+    el.innerHTML = `<div class="mark">${c.status === "approved" ? "✓" : ""}</div><div>${c.description}</div>`;
+    el.onclick = async () => {
+      try {
+        const r = await api("check_condition", {
+          method: "POST",
+          body: { participant_id, condition_id: c.id },
+        });
+        if (r.condition_status === "approved") {
+          el.classList.add("approved");
+          el.querySelector(".mark").textContent = "✓";
+        } else if (r.condition_status === "awaiting_screenshot") {
+          tg?.showAlert("Пришли скриншот прямо в чат с ботом — я проверю и отмечу условие.");
+        } else if (r.condition_status === "not_subscribed") {
+          tg?.showAlert("Не вижу подписки на канал — подпишись и нажми ещё раз.");
+        }
+        if (r.contest_confirmed) renderContest(ref);
+      } catch (e) { tg?.showAlert("Ошибка: " + e.message); }
+    };
+    condsEl.appendChild(el);
+  });
+}
+
+// ===== Экран оплаты подписки =====
+async function renderPaywall(onPaid) {
+  render(`
+    <div class="card">
+      <h1>Нужна подписка</h1>
+      <p>Создание и ведение конкурсов доступно по подписке — 390₽ / 30 дней.</p>
+      <button class="btn" id="pay-btn">Оплатить через CryptoBot</button>
+    </div>
+  `);
+  document.getElementById("pay-btn").onclick = async () => {
+    const { pay_url, invoice_id } = await api("create_invoice", { method: "POST" });
+    tg?.openTelegramLink ? tg.openTelegramLink(pay_url) : window.open(pay_url, "_blank");
+    render(`<div class="card"><p>Ждём оплату…</p></div>`);
+    const poll = setInterval(async () => {
+      const r = await api("check_payment", { method: "POST", body: { invoice_id } });
+      if (r.paid) { clearInterval(poll); onPaid(); }
+    }, 3000);
+  };
+}
+
+// ===== Экран "Мои конкурсы" (доступен любому пользователю, подписка проверяется при создании) =====
+async function renderAdmin() {
+  render("<p>Загрузка…</p>");
+  let status;
+  try { status = await api("admin_status"); }
+  catch (e) { render(`<div class="card"><p>Ошибка: ${e.message}</p></div>`); return; }
+
+  const list = await api("list_contests");
+  render(`
+    <h1>Мои конкурсы</h1>
+    ${status.is_admin ? `<p>У тебя как у владельца бота — подписка не нужна.</p>` : ""}
+    <div id="list"></div>
+    <button class="btn" id="new-btn">+ Создать конкурс</button>
+  `);
+  const listEl = document.getElementById("list");
+  if (list.contests.length === 0) {
+    listEl.innerHTML = `<p>Пока нет ни одного конкурса.</p>`;
+  }
+  list.contests.forEach(c => {
+    const el = document.createElement("div");
+    el.className = "card list-item";
+    el.innerHTML = `
+      <div>
+        <div class="title">${c.title}</div>
+        <div class="meta">${c.status} · до ${new Date(c.deadline_at).toLocaleString("ru-RU")}</div>
+      </div>
+      <button class="muted-link" data-link="${c.ref_link}">Копировать ссылку</button>
+    `;
+    el.querySelector("button").onclick = (e) => {
+      navigator.clipboard.writeText(e.target.dataset.link);
+      tg?.showAlert("Ссылка скопирована");
+    };
+    listEl.appendChild(el);
+  });
+
+  document.getElementById("new-btn").onclick = () => {
+    if (!status.subscribed) { renderPaywall(renderCreateForm); return; }
+    renderCreateForm();
+  };
+}
+
+function renderCreateForm() {
+  render(`
+    <h1>Новый конкурс</h1>
+    <label>Название</label>
+    <input id="f-title" placeholder="Например, Раздача iPhone 16">
+    <label>Описание</label>
+    <textarea id="f-desc" rows="3" placeholder="Что участникам нужно знать"></textarea>
+    <label>Дедлайн</label>
+    <input id="f-deadline" type="datetime-local">
+
+    <h2>Призовые места</h2>
+    <div id="places"></div>
+    <button class="muted-link" id="add-place">+ Добавить место</button>
+
+    <h2>Условия участия</h2>
+    <div id="conditions"></div>
+    <button class="muted-link" id="add-cond">+ Добавить условие</button>
+
+    <button class="btn" id="submit-btn">Создать конкурс</button>
+  `);
+
+  const placesEl = document.getElementById("places");
+  const condsEl = document.getElementById("conditions");
+
+  function addPlaceRow(n = "") {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `
+      <input class="p-num" type="number" placeholder="Место" value="${n}">
+      <input class="p-prize" placeholder="Приз">
+      <input class="p-cap" type="number" placeholder="Кол-во (пусто = без лимита)">
+    `;
+    placesEl.appendChild(row);
+  }
+  function addCondRow() {
+    const row = document.createElement("div");
+    row.className = "card";
+    row.innerHTML = `
+      <select class="c-type">
+        <option value="auto_channel_sub">Подписка на канал (авто)</option>
+        <option value="manual_screenshot">Скриншот (проверка вручную)</option>
+      </select>
+      <input class="c-channel" placeholder="ID канала (для авто), напр. -1001234567890">
+      <input class="c-desc" placeholder="Текст условия для участника">
+    `;
+    condsEl.appendChild(row);
+  }
+  addPlaceRow(1);
+  addCondRow();
+  document.getElementById("add-place").onclick = () => addPlaceRow();
+  document.getElementById("add-cond").onclick = () => addCondRow();
+
+  document.getElementById("submit-btn").onclick = async () => {
+    const places = [...placesEl.children].map(r => ({
+      place: parseInt(r.querySelector(".p-num").value || "1"),
+      prize: r.querySelector(".p-prize").value,
+      capacity: r.querySelector(".p-cap").value ? parseInt(r.querySelector(".p-cap").value) : null,
+    }));
+    const conditions = [...condsEl.children].map(r => ({
+      type: r.querySelector(".c-type").value,
+      channel_id: r.querySelector(".c-channel").value ? parseInt(r.querySelector(".c-channel").value) : null,
+      description: r.querySelector(".c-desc").value,
+    }));
+    const deadlineRaw = document.getElementById("f-deadline").value; // YYYY-MM-DDTHH:MM
+    try {
+      const r = await api("create_contest", {
+        method: "POST",
+        body: {
+          title: document.getElementById("f-title").value,
+          description: document.getElementById("f-desc").value,
+          deadline_at: deadlineRaw,
+          places, conditions,
+        },
+      });
+      render(`<div class="card"><h1>Готово ✅</h1><p>Реф-ссылка:</p><p style="word-break:break-all">${r.ref_link}</p></div>`);
+    } catch (e) {
+      if (e.message.includes("subscription")) { renderPaywall(renderCreateForm); }
+      else tg?.showAlert("Ошибка: " + e.message);
+    }
+  };
+}
+
+// ===== Точка входа =====
+(function init() {
+  const ref = params.get("ref");
+  if (ref) renderContest(ref);
+  else renderAdmin();
+})();
+</script>
+</body>
+</html>

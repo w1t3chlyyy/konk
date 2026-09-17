@@ -3,6 +3,7 @@
 create table contests (
     id            bigserial primary key,
     ref_code      text unique not null,          -- код в реф-ссылке t.me/bot?start=c_<ref_code>
+    owner_user_id bigint not null,               -- кто создал конкурс (для мультипользовательской подписки)
     title         text not null,
     description   text,
     status        text not null default 'draft',  -- draft | active | finished
@@ -52,3 +53,36 @@ create table condition_checks (
 
 create index idx_participants_contest on participants(contest_id);
 create index idx_condition_checks_status on condition_checks(status);
+create index idx_contests_owner on contests(owner_user_id);
+
+-- ===== Mini App: приветствие, подписка, платежи =====
+
+create table bot_settings (
+    id                     bigserial primary key,
+    welcome_text           text not null default 'Добро пожаловать! 🎉',
+    welcome_media_file_id  text,           -- telegram file_id (фото/видео) для приветствия
+    welcome_media_type     text,           -- 'photo' | 'video' | null
+    updated_at             timestamptz not null default now()
+);
+insert into bot_settings (welcome_text) values ('Добро пожаловать! 🎉 Здесь проходят конкурсы.');
+
+create table admin_subscription (
+    id           bigserial primary key,
+    user_id      bigint unique not null,
+    active       boolean not null default false,
+    lifetime     boolean not null default false,   -- вечная подписка (владелец бота)
+    expires_at   timestamptz,
+    updated_at   timestamptz not null default now()
+);
+
+create table payments (
+    id           bigserial primary key,
+    user_id      bigint not null,
+    invoice_id   text unique not null,   -- id инвойса CryptoBot
+    amount       numeric not null,
+    asset        text not null,          -- валюта CryptoBot, напр. USDT
+    status       text not null default 'pending', -- pending | paid | expired
+    created_at   timestamptz not null default now(),
+    paid_at      timestamptz
+);
+

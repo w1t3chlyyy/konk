@@ -2,11 +2,11 @@ from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from datetime import datetime
 import secrets
 
-from bot.config import ADMIN_ID
+from bot.config import ADMIN_ID, MINIAPP_URL
 from bot.db import get_pool
 
 router = Router()
@@ -21,13 +21,73 @@ class NewContest(StatesGroup):
     conditions = State()      # ввод условий построчно: "auto|channel_id|текст" или "manual|-|текст"
 
 
+class EditWelcome(StatesGroup):
+    text = State()
+    media = State()
+
+
 @router.message(Command("admin"))
 async def admin_menu(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⚙️ Открыть Mini App", web_app=WebAppInfo(url=f"{MINIAPP_URL}/")),
+    ]])
     await message.answer(
         "Админ-панель:\n"
-        "/new_contest — создать конкурс\n"
-        "/contests — список конкурсов и их реф-ссылки"
+        "/edit_welcome — изменить приветственный текст и медиа\n"
+        "/new_contest — создать конкурс (чат, устаревающий способ)\n"
+        "/contests — список конкурсов и их реф-ссылки\n\n"
+        "Управление конкурсами и подписками — в Mini App:",
+        reply_markup=kb,
     )
+
+
+@router.message(Command("edit_welcome"))
+async def edit_welcome_start(message: Message, state: FSMContext):
+    await state.set_state(EditWelcome.text)
+    await message.answer("Пришли новый текст приветствия (то, что видит юзер по /start).")
+
+
+@router.message(StateFilter(EditWelcome.text))
+async def edit_welcome_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await state.set_state(EditWelcome.media)
+    await message.answer(
+        "Теперь пришли фото или видео для приветствия — или напиши «нет», чтобы оставить без медиа."
+    )
+
+
+@router.message(StateFilter(EditWelcome.media), F.photo)
+async def edit_welcome_photo(message: Message, state: FSMContext):
+    await _save_welcome(message, state, message.photo[-1].file_id, "photo")
+
+
+@router.message(StateFilter(EditWelcome.media), F.video)
+async def edit_welcome_video(message: Message, state: FSMContext):
+    await _save_welcome(message, state, message.video.file_id, "video")
+
+
+@router.message(StateFilter(EditWelcome.media))
+async def edit_welcome_skip(message: Message, state: FSMContext):
+    if message.text and message.text.strip().lower() in ("нет", "no", "skip", "-"):
+        await _save_welcome(message, state, None, None)
+    else:
+        await message.answer("Пришли фото/видео, или напиши «нет».")
+
+
+async def _save_welcome(message: Message, state: FSMContext, media_id: str | None, media_type: str | None):
+    data = await state.get_data()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            update bot_settings set welcome_text = $1, welcome_media_file_id = $2,
+                                     welcome_media_type = $3, updated_at = now()
+            where id = (select id from bot_settings order by id limit 1)
+            """,
+            data["text"], media_id, media_type,
+        )
+    await state.clear()
+    await message.answer("Приветствие обновлено ✅")
 
 
 @router.message(Command("new_contest"))
