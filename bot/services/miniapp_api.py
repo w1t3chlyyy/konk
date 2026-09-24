@@ -68,6 +68,7 @@ async def get_contest(ref_code: str, init_data: str) -> dict:
                 "id": c["id"],
                 "type": c["type"],
                 "description": c["description"],
+                "link": c["link"],
                 "status": checks.get(c["id"], "pending"),
             }
             for c in conditions
@@ -154,15 +155,15 @@ async def create_contest(init_data: str, payload: dict, bot) -> dict:
             )
             for p in payload["places"]:
                 await conn.execute(
-                    """insert into prize_places (contest_id, place_number, prize_text, capacity)
-                       values ($1, $2, $3, $4)""",
-                    contest["id"], p["place"], p["prize"], p.get("capacity"),
+                    """insert into prize_places (contest_id, place_number, prize_text)
+                       values ($1, $2, $3)""",
+                    contest["id"], p["place"], p["prize"],
                 )
             for i, c in enumerate(payload["conditions"]):
                 await conn.execute(
-                    """insert into conditions (contest_id, type, description, channel_id, sort_order)
-                       values ($1, $2, $3, $4, $5)""",
-                    contest["id"], c["type"], c["description"], c.get("channel_id"), i,
+                    """insert into conditions (contest_id, type, description, link, channel_id, sort_order)
+                       values ($1, $2, $3, $4, $5, $6)""",
+                    contest["id"], c["type"], c["description"], c.get("link"), c.get("channel_id"), i,
                 )
 
     me = await bot.get_me()
