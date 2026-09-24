@@ -8,7 +8,10 @@
 <style>
   :root {
     --blue: #2f6fed;
+    --blue-dark: #1f4fc4;
     --blue-light: #eaf1ff;
+    --green: #22c55e;
+    --green-light: #e9fbf0;
     --text: #14213d;
     --muted: #7c8aa5;
     --bg: #ffffff;
@@ -18,82 +21,169 @@
   body {
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg);
+    background: linear-gradient(180deg, #f6f9ff 0%, #ffffff 220px);
     color: var(--text);
     padding: 20px 16px 40px;
+    -webkit-font-smoothing: antialiased;
   }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  h2 { font-size: 16px; margin: 24px 0 12px; }
-  p { color: var(--muted); font-size: 14px; line-height: 1.5; }
+  h1 { font-size: 21px; margin: 0 0 4px; letter-spacing: -0.2px; }
+  h2 { font-size: 15px; margin: 26px 0 12px; color: var(--text); font-weight: 700; }
+  p { color: var(--muted); font-size: 14px; line-height: 1.5; margin: 0 0 4px; }
   .card {
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 16px;
+    border-radius: 18px;
+    padding: 18px;
     margin-bottom: 12px;
+    box-shadow: 0 1px 2px rgba(20,33,61,.03);
   }
   .btn {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     width: 100%;
-    background: var(--blue);
+    background: linear-gradient(135deg, var(--blue), var(--blue-dark));
     color: #fff;
     border: none;
-    border-radius: 12px;
+    border-radius: 14px;
     padding: 14px;
     font-size: 15px;
     font-weight: 600;
     cursor: pointer;
     margin-top: 8px;
+    transition: transform .12s ease, box-shadow .12s ease;
+    box-shadow: 0 4px 14px rgba(47,111,237,.25);
   }
-  .btn:disabled { opacity: .5; }
-  .btn.secondary { background: var(--blue-light); color: var(--blue); }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .5; box-shadow: none; }
+  .btn.secondary {
+    background: var(--blue-light);
+    color: var(--blue);
+    box-shadow: none;
+  }
+  .btn.link-btn {
+    background: var(--green-light);
+    color: #15803d;
+    font-size: 13.5px;
+    padding: 10px;
+    margin-top: 10px;
+    box-shadow: none;
+  }
+
   .condition {
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    margin-bottom: 10px;
+    padding: 14px;
+    transition: background .2s ease, border-color .2s ease;
+  }
+  .condition.approved {
+    background: var(--green-light);
+    border-color: #bdf0cf;
+  }
+  .cond-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+  }
+  .mark {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    background: #fff;
+    transition: background .2s ease, border-color .2s ease, transform .2s ease;
+  }
+  .condition.approved .mark {
+    background: var(--green);
+    border-color: var(--green);
+    transform: scale(1.05);
+  }
+  .mark svg { width: 14px; height: 14px; }
+  .mark path {
+    stroke: #fff;
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    fill: none;
+    stroke-dasharray: 20;
+    stroke-dashoffset: 20;
+  }
+  .condition.approved .mark path {
+    animation: draw-check .35s ease forwards;
+  }
+  @keyframes draw-check {
+    to { stroke-dashoffset: 0; }
+  }
+  .cond-text { font-size: 14.5px; line-height: 1.4; flex: 1; }
+  .cond-hint { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  .banner {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    margin-bottom: 8px;
-    cursor: pointer;
-  }
-  .condition .mark {
-    width: 22px; height: 22px; border-radius: 50%;
-    border: 2px solid var(--border);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 13px; color: #fff; flex-shrink: 0;
-  }
-  .condition.approved .mark { background: var(--blue); border-color: var(--blue); }
-  .banner {
-    background: var(--blue-light);
-    color: var(--blue);
-    border-radius: 12px;
-    padding: 12px 14px;
+    background: linear-gradient(135deg, var(--blue-light), #f2f7ff);
+    color: var(--blue-dark);
+    border-radius: 16px;
+    padding: 14px;
     font-size: 14px;
     font-weight: 600;
-    margin-bottom: 12px;
+    margin-bottom: 14px;
+    animation: pop-in .3s ease;
   }
+  .banner svg { width: 22px; height: 22px; flex-shrink: 0; }
+  @keyframes pop-in {
+    from { opacity: 0; transform: translateY(-6px) scale(.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .hero {
+    text-align: center;
+    padding: 8px 0 18px;
+  }
+  .hero svg { width: 64px; height: 64px; margin-bottom: 8px; }
+
   input, textarea, select {
     width: 100%;
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 10px 12px;
+    border-radius: 12px;
+    padding: 11px 12px;
     font-size: 14px;
     margin-bottom: 10px;
     font-family: inherit;
+    background: #fbfcff;
   }
-  label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 4px; }
+  input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: var(--blue);
+    background: #fff;
+  }
+  label { font-size: 12.5px; color: var(--muted); display: block; margin-bottom: 4px; font-weight: 600; }
   .row { display: flex; gap: 8px; }
   .row > * { flex: 1; }
-  .muted-link { color: var(--blue); font-size: 13px; background: none; border: none; padding: 8px 0; cursor: pointer; }
+  .muted-link { color: var(--blue); font-size: 13px; background: none; border: none; padding: 8px 0; cursor: pointer; font-weight: 600; }
   .list-item { display: flex; justify-content: space-between; align-items: center; }
-  .list-item .title { font-weight: 600; font-size: 14px; }
-  .list-item .meta { color: var(--muted); font-size: 12px; }
+  .list-item .title { font-weight: 700; font-size: 14.5px; }
+  .list-item .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .skeleton {
+    height: 64px;
+    border-radius: 16px;
+    background: linear-gradient(90deg, #f0f3fa 25%, #f8fafd 37%, #f0f3fa 63%);
+    background-size: 400% 100%;
+    animation: shimmer 1.4s ease infinite;
+    margin-bottom: 12px;
+  }
+  @keyframes shimmer {
+    0% { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+  }
   #app { max-width: 480px; margin: 0 auto; }
 </style>
 </head>
 <body>
-<div id="app"><p>Загрузка…</p></div>
+<div id="app"><div class="skeleton"></div><div class="skeleton"></div></div>
 
 <script>
 const tg = window.Telegram?.WebApp;
@@ -101,6 +191,19 @@ if (tg) { tg.ready(); tg.expand(); }
 const initData = tg?.initData || "";
 const params = new URLSearchParams(location.search);
 const app = document.getElementById("app");
+
+const ICONS = {
+  check: `<svg viewBox="0 0 14 14"><path d="M2 7l3.5 3.5L12 3.5"/></svg>`,
+  gift: `<svg viewBox="0 0 24 24" fill="none" stroke="#2f6fed" stroke-width="1.6"><rect x="3" y="8" width="18" height="12" rx="2"/><path d="M3 12h18"/><path d="M12 8v12"/><path d="M12 8c-1.5-3.5-6-4-6-1.5C6 8 8.5 8 12 8Z"/><path d="M12 8c1.5-3.5 6-4 6-1.5C18 8 15.5 8 12 8Z"/></svg>`,
+  party: `<svg viewBox="0 0 24 24" fill="none" stroke="#2f6fed" stroke-width="1.6"><path d="M3 21l6-14 12 12-14 2Z"/><path d="M14 4l1.5 1.5M18 3l1 2M20 7l2 1"/></svg>`,
+  arrow: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M7 17L17 7M9 7h8v8"/></svg>`,
+};
+
+function openLink(url) {
+  if (!url) return;
+  if (tg?.openLink) tg.openLink(url);
+  else window.open(url, "_blank");
+}
 
 async function api(action, { method = "GET", body, query } = {}) {
   const qs = new URLSearchParams({ action, ...(query || {}) });
@@ -120,7 +223,7 @@ function render(html) { app.innerHTML = html; }
 
 // ===== Экран участника =====
 async function renderContest(ref) {
-  render("<p>Загрузка конкурса…</p>");
+  render(`<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>`);
   let data;
   try { data = await api("contest", { query: { ref } }); }
   catch (e) { render(`<div class="card"><p>Не удалось загрузить конкурс: ${e.message}</p></div>`); return; }
@@ -129,9 +232,8 @@ async function renderContest(ref) {
   const confirmed = status === "confirmed";
 
   render(`
-    <h1>🎉 ${contest.title}</h1>
-    <p>${contest.description || ""}</p>
-    ${confirmed ? `<div class="banner">Вы участвуете в конкурсе! Дождитесь подведения итогов.</div>` : ""}
+    <div class="hero">${ICONS.gift}<h1>${contest.title}</h1><p>${contest.description || ""}</p></div>
+    ${confirmed ? `<div class="banner">${ICONS.party}<span>Вы участвуете в конкурсе! Дождитесь подведения итогов.</span></div>` : ""}
     <h2>Условия участия</h2>
     <div id="conds"></div>
   `);
@@ -140,8 +242,18 @@ async function renderContest(ref) {
   conditions.forEach(c => {
     const el = document.createElement("div");
     el.className = "condition" + (c.status === "approved" ? " approved" : "");
-    el.innerHTML = `<div class="mark">${c.status === "approved" ? "✓" : ""}</div><div>${c.description}</div>`;
-    el.onclick = async () => {
+    el.innerHTML = `
+      <div class="cond-top">
+        <div class="mark">${ICONS.check}</div>
+        <div>
+          <div class="cond-text">${c.description}</div>
+          ${c.status === "awaiting_screenshot" ? `<div class="cond-hint">Скриншот на проверке…</div>` : ""}
+        </div>
+      </div>
+      ${c.link ? `<button class="btn link-btn" type="button">Выполнить ${ICONS.arrow}</button>` : ""}
+    `;
+    el.querySelector(".cond-top").onclick = async () => {
+      if (c.status === "approved") return;
       try {
         const r = await api("check_condition", {
           method: "POST",
@@ -149,7 +261,6 @@ async function renderContest(ref) {
         });
         if (r.condition_status === "approved") {
           el.classList.add("approved");
-          el.querySelector(".mark").textContent = "✓";
         } else if (r.condition_status === "awaiting_screenshot") {
           tg?.showAlert("Пришли скриншот прямо в чат с ботом — я проверю и отмечу условие.");
         } else if (r.condition_status === "not_subscribed") {
@@ -158,6 +269,8 @@ async function renderContest(ref) {
         if (r.contest_confirmed) renderContest(ref);
       } catch (e) { tg?.showAlert("Ошибка: " + e.message); }
     };
+    const linkBtn = el.querySelector(".link-btn");
+    if (linkBtn) linkBtn.onclick = () => openLink(c.link);
     condsEl.appendChild(el);
   });
 }
@@ -182,9 +295,9 @@ async function renderPaywall(onPaid) {
   };
 }
 
-// ===== Экран "Мои конкурсы" (доступен любому пользователю, подписка проверяется при создании) =====
+// ===== Экран "Мои конкурсы" =====
 async function renderAdmin() {
-  render("<p>Загрузка…</p>");
+  render(`<div class="skeleton"></div><div class="skeleton"></div>`);
   let status;
   try { status = await api("admin_status"); }
   catch (e) { render(`<div class="card"><p>Ошибка: ${e.message}</p></div>`); return; }
@@ -234,6 +347,7 @@ function renderCreateForm() {
     <input id="f-deadline" type="datetime-local">
 
     <h2>Призовые места</h2>
+    <p style="margin-bottom:10px">Победители распределяются автоматически поровну между всеми местами.</p>
     <div id="places"></div>
     <button class="muted-link" id="add-place">+ Добавить место</button>
 
@@ -253,7 +367,6 @@ function renderCreateForm() {
     row.innerHTML = `
       <input class="p-num" type="number" placeholder="Место" value="${n}">
       <input class="p-prize" placeholder="Приз">
-      <input class="p-cap" type="number" placeholder="Кол-во (пусто = без лимита)">
     `;
     placesEl.appendChild(row);
   }
@@ -267,6 +380,7 @@ function renderCreateForm() {
       </select>
       <input class="c-channel" placeholder="ID канала (для авто), напр. -1001234567890">
       <input class="c-desc" placeholder="Текст условия для участника">
+      <input class="c-link" placeholder="Ссылка на кнопку «Выполнить» (необязательно)">
     `;
     condsEl.appendChild(row);
   }
@@ -279,14 +393,14 @@ function renderCreateForm() {
     const places = [...placesEl.children].map(r => ({
       place: parseInt(r.querySelector(".p-num").value || "1"),
       prize: r.querySelector(".p-prize").value,
-      capacity: r.querySelector(".p-cap").value ? parseInt(r.querySelector(".p-cap").value) : null,
     }));
     const conditions = [...condsEl.children].map(r => ({
       type: r.querySelector(".c-type").value,
       channel_id: r.querySelector(".c-channel").value ? parseInt(r.querySelector(".c-channel").value) : null,
       description: r.querySelector(".c-desc").value,
+      link: r.querySelector(".c-link").value || null,
     }));
-    const deadlineRaw = document.getElementById("f-deadline").value; // YYYY-MM-DDTHH:MM
+    const deadlineRaw = document.getElementById("f-deadline").value;
     try {
       const r = await api("create_contest", {
         method: "POST",
