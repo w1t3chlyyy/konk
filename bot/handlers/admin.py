@@ -17,8 +17,8 @@ class NewContest(StatesGroup):
     title = State()
     description = State()
     deadline = State()
-    places = State()          # ввод призов построчно: "1|Приз|Вместимость" (вместимость - или число, или *)
-    conditions = State()      # ввод условий построчно: "auto|channel_id|текст" или "manual|-|текст"
+    places = State()          # ввод призов построчно: "место|приз"
+    conditions = State()      # ввод условий построчно: "auto|channel_id|текст|ссылка" или "manual|-|текст|ссылка"
 
 
 class EditWelcome(StatesGroup):
@@ -129,8 +129,9 @@ async def get_deadline(message: Message, state: FSMContext):
     await state.set_state(NewContest.places)
     await message.answer(
         "Призы по местам, каждый с новой строки, формат:\n"
-        "<b>место|приз|вместимость</b> (вместимость — число или * для «без ограничений»)\n\n"
-        "Например:\n1|iPhone 16|1\n2|Подарочный сертификат|*",
+        "<b>место|приз</b>\n\n"
+        "Победители распределяются автоматически поровну между всеми местами.\n\n"
+        "Например:\n1|iPhone 16\n2|Подарочный сертификат",
         parse_mode="HTML",
     )
 
@@ -140,22 +141,25 @@ async def get_places(message: Message, state: FSMContext):
     places = []
     for line in message.text.strip().splitlines():
         parts = [p.strip() for p in line.split("|")]
-        if len(parts) != 3:
+        if len(parts) != 2:
             await message.answer(f"Не понял строку: {line}\nПовтори ввод целиком.")
             return
-        place_num, prize, cap = parts
-        places.append({
-            "place": int(place_num),
-            "prize": prize,
-            "capacity": None if cap == "*" else int(cap),
-        })
+        place_num, prize = parts
+        try:
+            place_num_int = int(place_num)
+        except ValueError:
+            await message.answer(f"Место должно быть числом: {line}\nПовтори ввод целиком.")
+            return
+        places.append({"place": place_num_int, "prize": prize})
     await state.update_data(places=places)
     await state.set_state(NewContest.conditions)
     await message.answer(
         "Условия участия, каждое с новой строки, формат:\n"
-        "<b>auto|channel_id|текст</b> — автопроверка подписки на канал\n"
-        "<b>manual|-|текст</b> — проверка по скриншоту\n\n"
-        "Например:\nauto|-1001234567890|Подписка на канал\nmanual|-|Репост в сторис",
+        "<b>auto|channel_id|текст|ссылка</b> — автопроверка подписки на канал\n"
+        "<b>manual|-|текст|ссылка</b> — проверка по скриншоту\n"
+        "(ссылка необязательна — покажется как кнопка «Выполнить»; если её нет, поставь -)\n\n"
+        "Например:\nauto|-1001234567890|Подписка на канал|https://t.me/mychannel\n"
+        "manual|-|Репост в сторис|-",
         parse_mode="HTML",
     )
 
@@ -164,15 +168,16 @@ async def get_places(message: Message, state: FSMContext):
 async def get_conditions(message: Message, state: FSMContext):
     conditions = []
     for i, line in enumerate(message.text.strip().splitlines()):
-        parts = [p.strip() for p in line.split("|", 2)]
-        if len(parts) != 3:
+        parts = [p.strip() for p in line.split("|", 3)]
+        if len(parts) != 4:
             await message.answer(f"Не понял строку: {line}\nПовтори ввод целиком.")
             return
-        ctype, chan, text = parts
+        ctype, chan, text, link = parts
         conditions.append({
             "type": "auto_channel_sub" if ctype == "auto" else "manual_screenshot",
             "channel_id": int(chan) if ctype == "auto" else None,
             "description": text,
+            "link": None if link == "-" else link,
             "sort_order": i,
         })
 
@@ -184,21 +189,21 @@ async def get_conditions(message: Message, state: FSMContext):
     async with pool.acquire() as conn:
         async with conn.transaction():
             contest = await conn.fetchrow(
-                """insert into contests (ref_code, title, description, status, deadline_at)
-                   values ($1, $2, $3, 'active', $4) returning id""",
-                ref_code, data["title"], data["description"], deadline_dt,
+                """insert into contests (ref_code, owner_user_id, title, description, status, deadline_at)
+                   values ($1, $2, $3, $4, 'active', $5) returning id""",
+                ref_code, message.from_user.id, data["title"], data["description"], deadline_dt,
             )
             for p in data["places"]:
                 await conn.execute(
-                    """insert into prize_places (contest_id, place_number, prize_text, capacity)
-                       values ($1, $2, $3, $4)""",
-                    contest["id"], p["place"], p["prize"], p["capacity"],
+                    """insert into prize_places (contest_id, place_number, prize_text)
+                       values ($1, $2, $3)""",
+                    contest["id"], p["place"], p["prize"],
                 )
             for c in conditions:
                 await conn.execute(
-                    """insert into conditions (contest_id, type, description, channel_id, sort_order)
-                       values ($1, $2, $3, $4, $5)""",
-                    contest["id"], c["type"], c["description"], c["channel_id"], c["sort_order"],
+                    """insert into conditions (contest_id, type, description, link, channel_id, sort_order)
+                       values ($1, $2, $3, $4, $5, $6)""",
+                    contest["id"], c["type"], c["description"], c["link"], c["channel_id"], c["sort_order"],
                 )
 
     me = await message.bot.get_me()
