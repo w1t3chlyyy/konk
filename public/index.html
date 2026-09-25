@@ -3,7 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Конкурсы</title>
+<title>Contest Bot & Mini App</title>
+<meta name="description" content="Telegram contest bot and web Mini App for creating and managing giveaways, subscriptions, and checklists.">
+<meta property="og:title" content="Contest Bot & Mini App">
+<meta property="og:description" content="Telegram contest bot and web Mini App for creating and managing giveaways, subscriptions, and checklists.">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root {
@@ -199,6 +202,21 @@ const ICONS = {
   arrow: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M7 17L17 7M9 7h8v8"/></svg>`,
 };
 
+function notify(msg) {
+  if (tg?.showAlert) {
+    try { tg.showAlert(msg); return; } catch (e) {}
+  }
+  const oldToast = document.getElementById("toast-msg");
+  if (oldToast) oldToast.remove();
+  const toast = document.createElement("div");
+  toast.id = "toast-msg";
+  toast.className = "banner";
+  toast.style.cssText = "position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,0.15);width:calc(100% - 32px);max-width:440px;";
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3500);
+}
+
 function openLink(url) {
   if (!url) return;
   if (tg?.openLink) tg.openLink(url);
@@ -262,12 +280,12 @@ async function renderContest(ref) {
         if (r.condition_status === "approved") {
           el.classList.add("approved");
         } else if (r.condition_status === "awaiting_screenshot") {
-          tg?.showAlert("Пришли скриншот прямо в чат с ботом — я проверю и отмечу условие.");
+          notify("Пришли скриншот прямо в чат с ботом — я проверю и отмечу условие.");
         } else if (r.condition_status === "not_subscribed") {
-          tg?.showAlert("Не вижу подписки на канал — подпишись и нажми ещё раз.");
+          notify("Не вижу подписки на канал — подпишись и нажми ещё раз.");
         }
         if (r.contest_confirmed) renderContest(ref);
-      } catch (e) { tg?.showAlert("Ошибка: " + e.message); }
+      } catch (e) { notify("Ошибка: " + e.message); }
     };
     const linkBtn = el.querySelector(".link-btn");
     if (linkBtn) linkBtn.onclick = () => openLink(c.link);
@@ -321,11 +339,14 @@ async function renderAdmin() {
         <div class="title">${c.title}</div>
         <div class="meta">${c.status} · до ${new Date(c.deadline_at).toLocaleString("ru-RU")}</div>
       </div>
-      <button class="muted-link" data-link="${c.ref_link}">Копировать ссылку</button>
+      <div style="display:flex;gap:10px;align-items:center;">
+        <a href="${c.ref_link}" class="muted-link" style="text-decoration:none">Открыть</a>
+        <button class="muted-link copy-btn" data-link="${c.ref_link}">Копировать</button>
+      </div>
     `;
-    el.querySelector("button").onclick = (e) => {
+    el.querySelector(".copy-btn").onclick = (e) => {
       navigator.clipboard.writeText(e.target.dataset.link);
-      tg?.showAlert("Ссылка скопирована");
+      notify("Ссылка скопирована");
     };
     listEl.appendChild(el);
   });
@@ -411,10 +432,18 @@ function renderCreateForm() {
           places, conditions,
         },
       });
-      render(`<div class="card"><h1>Готово ✅</h1><p>Реф-ссылка:</p><p style="word-break:break-all">${r.ref_link}</p></div>`);
+      render(`
+        <div class="card">
+          <h1>Готово ✅</h1>
+          <p>Конкурс успешно создан! Ссылка для участников:</p>
+          <p style="word-break:break-all;font-weight:600;color:var(--blue);margin:8px 0;">${r.ref_link}</p>
+          <button class="btn" style="margin-top:12px" onclick="location.href='${r.ref_link}'">Перейти к конкурсу</button>
+          <button class="btn secondary" style="margin-top:8px" onclick="renderAdmin()">Вернуться в список</button>
+        </div>
+      `);
     } catch (e) {
       if (e.message.includes("subscription")) { renderPaywall(renderCreateForm); }
-      else tg?.showAlert("Ошибка: " + e.message);
+      else notify("Ошибка: " + e.message);
     }
   };
 }

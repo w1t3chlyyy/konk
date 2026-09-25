@@ -1,0 +1,5 @@
+{
+  "name": "Contest Bot & Mini App",
+  "description": "Telegram contest bot and web Mini App for creating and managing giveaways, subscriptions, and checklists.",
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
