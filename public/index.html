@@ -295,17 +295,20 @@ async function renderContest(ref) {
 
 // ===== Экран оплаты подписки =====
 async function renderPaywall(onPaid) {
+  let status = { price_rub: 390 };
+  try { status = await api("admin_status"); } catch(e) {}
   render(`
     <div class="card">
-      <h1>Нужна подписка</h1>
-      <p>Создание и ведение конкурсов доступно по подписке — 390₽ / 30 дней.</p>
-      <button class="btn" id="pay-btn">Оплатить через CryptoBot</button>
+      <h1>Необходима подписка</h1>
+      <p>Создание и проведение конкурсов доступно только по активной подписке организатора — ${status.price_rub || 390}₽ / 30 дней.</p>
+      <button class="btn" id="pay-btn">Оплатить через CryptoBot (${status.price_rub || 390}₽)</button>
+      <button class="btn secondary" style="margin-top:8px" onclick="renderAdmin()">Назад</button>
     </div>
   `);
   document.getElementById("pay-btn").onclick = async () => {
     const { pay_url, invoice_id } = await api("create_invoice", { method: "POST" });
     tg?.openTelegramLink ? tg.openTelegramLink(pay_url) : window.open(pay_url, "_blank");
-    render(`<div class="card"><p>Ждём оплату…</p></div>`);
+    render(`<div class="card"><p>Ожидаем подтверждения оплаты в CryptoBot…</p></div>`);
     const poll = setInterval(async () => {
       const r = await api("check_payment", { method: "POST", body: { invoice_id } });
       if (r.paid) { clearInterval(poll); onPaid(); }

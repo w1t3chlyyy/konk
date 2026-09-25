@@ -119,6 +119,45 @@ subscriptions.set(ADMIN_ID, {
   expires_at: null,
 });
 
+const botSettings = {
+  welcome_text: (
+    '👋 <b>Привет, {first_name}!</b>\n\n' +
+    'Добро пожаловать в Telegram-бота конкурсов и розыгрышей!\n\n' +
+    '✨ <b>Возможности:</b>\n' +
+    '• Участвуйте в розыгрышах ценных призов\n' +
+    '• Выполняйте простые условия (подписка, активность, скриншоты)\n' +
+    '• Создавайте свои собственные конкурсы через удобный Mini App\n\n' +
+    'Нажмите кнопку ниже, чтобы открыть приложение:'
+  ),
+  welcome_photo_url: '',
+  subscription_price_rub: 390,
+  bot_username: process.env.BOT_USERNAME || '',
+  app_short_name: process.env.APP_SHORT_NAME || 'app',
+};
+
+const adminChatStates = new Map<number, string>();
+
+let cachedBotUsername = botSettings.bot_username;
+
+async function getCachedBotUsername(): Promise<string> {
+  if (cachedBotUsername) return cachedBotUsername;
+  if (BOT_TOKEN) {
+    const me: any = await sendTelegramApi('getMe', {});
+    if (me?.ok && me.result?.username) {
+      cachedBotUsername = me.result.username;
+      botSettings.bot_username = me.result.username;
+      return cachedBotUsername;
+    }
+  }
+  return 'RandomizerGiftRobot';
+}
+
+function getContestShareLink(refCode: string, botUsername: string = 'RandomizerGiftRobot'): string {
+  const uname = botSettings.bot_username || botUsername;
+  const appShortName = botSettings.app_short_name || 'app';
+  return `https://t.me/${uname}/${appShortName}?startapp=c_${refCode}`;
+}
+
 // Seed a demo contest so user can test immediately
 const demoDeadline = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 const demoContestId = nextContestId++;
@@ -423,12 +462,13 @@ async function handleGet(action: string, req: Request, res: Response) {
     return res.json({
       is_admin: userId === ADMIN_ID,
       subscribed: isSubscribed(userId),
-      price_rub: SUBSCRIPTION_PRICE_RUB,
+      price_rub: botSettings.subscription_price_rub,
     });
   }
 
   if (action === 'list_contests') {
     const userId = getUserId(initData);
+    const botUser = await getCachedBotUsername();
     const userContests = Array.from(contests.values())
       .filter(c => c.owner_user_id === userId)
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
@@ -439,7 +479,7 @@ async function handleGet(action: string, req: Request, res: Response) {
         title: c.title,
         status: c.status,
         deadline_at: c.deadline_at,
-        ref_link: `${MINIAPP_URL}?ref=${c.ref_code}`,
+        ref_link: getContestShareLink(c.ref_code, botUser),
       })),
     });
   }
@@ -472,7 +512,78 @@ async function handlePost(action: string, req: Request, res: Response) {
 
   if (action === 'telegram_webhook') {
     const update = body;
+    const callbackQuery = update?.callback_query;
     const message = update?.message || update?.edited_message;
+
+    // Detect host dynamically
+    const forwardedHost = req.headers['x-forwarded-host'] as string;
+    const hostHeader = req.headers.host as string;
+    const host = forwardedHost || hostHeader || '';
+    const proto = (req.headers['x-forwarded-proto'] as string) || 'https';
+    const baseMiniapp = host && !host.includes('localhost') ? `${proto}://${host}` : MINIAPP_URL.replace(/\/$/, '');
+
+    // Handle Admin Chat Callbacks
+    if (callbackQuery) {
+      const cbId = callbackQuery.id;
+      const cbFrom = callbackQuery.from || {};
+      const cbUserId = cbFrom.id;
+      const cbMsg = callbackQuery.message || {};
+      const cbChatId = cbMsg.chat?.id;
+      const cbData = callbackQuery.data || '';
+
+      sendTelegramApi('answerCallbackQuery', { callback_query_id: cbId }).catch(console.error);
+
+      if (cbUserId !== ADMIN_ID && String(cbUserId) !== String(ADMIN_ID)) {
+        sendTelegramApi('sendMessage', {
+          chat_id: cbChatId,
+          text: '⛔ <b>Доступ запрещен:</b> только главный администратор бота может менять эти настройки.',
+          parse_mode: 'HTML',
+        }).catch(console.error);
+        return res.json({ ok: true });
+      }
+
+      if (cbData === 'adm_edit_text') {
+        adminChatStates.set(cbChatId, 'waiting_welcome_text');
+        sendTelegramApi('sendMessage', {
+          chat_id: cbChatId,
+          text: '✏️ <b>Отправьте новый текст приветствия</b> для команды /start.\n\n💡 <i>Вы можете использовать HTML-разметку и тег {first_name} для подстановки имени пользователя.</i>\n\nДля отмены отправьте /cancel',
+          parse_mode: 'HTML',
+        }).catch(console.error);
+      } else if (cbData === 'adm_edit_photo') {
+        adminChatStates.set(cbChatId, 'waiting_welcome_photo');
+        sendTelegramApi('sendMessage', {
+          chat_id: cbChatId,
+          text: '🖼️ <b>Отправьте изображение</b> (или прямую ссылку на фото), которое будет прикрепляться к приветствию.\n\nОтправьте <code>none</code>, чтобы убрать фото, или /cancel для отмены.',
+          parse_mode: 'HTML',
+        }).catch(console.error);
+      } else if (cbData === 'adm_edit_price') {
+        adminChatStates.set(cbChatId, 'waiting_sub_price');
+        sendTelegramApi('sendMessage', {
+          chat_id: cbChatId,
+          text: `💰 <b>Введите новую стоимость подписки (в рублях)</b> для обычных пользователей:\n\nТекущая цена: <b>${botSettings.subscription_price_rub}₽</b>\n\nДля отмены отправьте /cancel`,
+          parse_mode: 'HTML',
+        }).catch(console.error);
+      } else if (cbData === 'adm_settings') {
+        const curPrice = botSettings.subscription_price_rub;
+        const hasPhoto = botSettings.welcome_photo_url ? 'Установлено ✅' : 'Не установлено ❌';
+        sendTelegramApi('sendMessage', {
+          chat_id: cbChatId,
+          text: `⚙️ <b>Панель управления настройками бота (Чат-режим)</b>\n\n💵 <b>Цена подписки организатора:</b> ${curPrice}₽ / 30 дней\n🖼️ <b>Фото в приветствии:</b> ${hasPhoto}\n📝 <b>Текст приветствия:</b>\n<i>${botSettings.welcome_text.slice(0, 120)}...</i>\n\nВыберите действие для редактирования:`,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '✏️ Изменить текст приветствия', callback_data: 'adm_edit_text' }],
+              [{ text: '🖼️ Изменить фото приветствия', callback_data: 'adm_edit_photo' }],
+              [{ text: '💰 Изменить цену подписки', callback_data: 'adm_edit_price' }],
+              [{ text: '🚀 Открыть конструктор (Mini App)', web_app: { url: `${baseMiniapp}/?admin=1` } }],
+            ]
+          }
+        }).catch(console.error);
+      }
+
+      return res.json({ ok: true });
+    }
+
     if (!message) {
       return res.json({ ok: true });
     }
@@ -484,15 +595,82 @@ async function handlePost(action: string, req: Request, res: Response) {
     const text = (message.text || '').trim();
     const photo = message.photo;
 
-    // Detect host dynamically
-    const forwardedHost = req.headers['x-forwarded-host'] as string;
-    const hostHeader = req.headers.host as string;
-    const host = forwardedHost || hostHeader || '';
-    const proto = (req.headers['x-forwarded-proto'] as string) || 'https';
-    const baseMiniapp = host && !host.includes('localhost') ? `${proto}://${host}` : MINIAPP_URL.replace(/\/$/, '');
+    // Check if admin is currently in a state waiting for input
+    const adminState = adminChatStates.get(chatId);
+    if (adminState && (userId === ADMIN_ID || String(userId) === String(ADMIN_ID))) {
+      if (text === '/cancel') {
+        adminChatStates.delete(chatId);
+        sendTelegramApi('sendMessage', { chat_id: chatId, text: '❌ Действие отменено.' }).catch(console.error);
+        return res.json({ ok: true });
+      }
+
+      if (adminState === 'waiting_welcome_text' && text) {
+        botSettings.welcome_text = text;
+        adminChatStates.delete(chatId);
+        sendTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '✅ <b>Текст приветствия успешно обновлен!</b>\n\nНовый текст будет отправляться всем пользователям при /start.',
+          parse_mode: 'HTML',
+        }).catch(console.error);
+        return res.json({ ok: true });
+      }
+
+      if (adminState === 'waiting_welcome_photo') {
+        adminChatStates.delete(chatId);
+        if (photo && photo.length > 0) {
+          const fileId = photo[photo.length - 1].file_id;
+          botSettings.welcome_photo_url = fileId;
+          sendTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: '✅ <b>Фотография приветствия сохранена!</b> Теперь /start будет отправлять это изображение с подписью.',
+            parse_mode: 'HTML',
+          }).catch(console.error);
+        } else if (['none', 'нет', 'удалить'].includes(text.toLowerCase())) {
+          botSettings.welcome_photo_url = '';
+          sendTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: '✅ <b>Фото приветствия удалено.</b> Приветствие снова будет отправляться текстом.',
+            parse_mode: 'HTML',
+          }).catch(console.error);
+        } else if (text.startsWith('http')) {
+          botSettings.welcome_photo_url = text;
+          sendTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: '✅ <b>Ссылка на фото сохранена!</b>',
+            parse_mode: 'HTML',
+          }).catch(console.error);
+        } else {
+          sendTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: '⚠️ Не распознано изображение. Попробуйте еще раз или напишите /cancel',
+          }).catch(console.error);
+        }
+        return res.json({ ok: true });
+      }
+
+      if (adminState === 'waiting_sub_price') {
+        const cleanNum = parseInt(text.replace(/\D/g, ''), 10);
+        if (cleanNum > 0) {
+          botSettings.subscription_price_rub = cleanNum;
+          adminChatStates.delete(chatId);
+          sendTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: `✅ <b>Стоимость подписки успешно изменена на ${cleanNum}₽!</b>`,
+            parse_mode: 'HTML',
+          }).catch(console.error);
+          return res.json({ ok: true });
+        }
+        sendTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⚠️ Пожалуйста, введите корректное число (например: 490) или /cancel',
+        }).catch(console.error);
+        return res.json({ ok: true });
+      }
+    }
 
     let replyText = '';
     let replyMarkup: any = null;
+    let isPhotoMessage = false;
 
     if (text.startsWith('/start')) {
       const parts = text.split(/\s+/);
@@ -522,20 +700,35 @@ async function handlePost(action: string, req: Request, res: Response) {
           [{ text: '🎁 Открыть конкурсы', web_app: { url: appUrl } }]
         ];
         if (userId === ADMIN_ID || String(userId) === String(ADMIN_ID)) {
-          buttons.push([{ text: '⚙️ Создать конкурс (Админ)', web_app: { url: adminUrl } }]);
+          buttons.push([{ text: '⚙️ Конструктор конкурсов (Admin)', web_app: { url: adminUrl } }]);
+          buttons.push([{ text: '🛠️ Настройки бота (Цены, Текст, Фото)', callback_data: 'adm_settings' }]);
         }
 
-        replyText = `👋 <b>Привет, ${firstName}!</b>\n\nДобро пожаловать в Telegram-бота конкурсов и розыгрышей!\n\n✨ <b>Возможности:</b>\n• Участвуйте в розыгрышах ценных призов\n• Выполняйте простые условия (подписка, активность, скриншоты)\n• Создавайте свои собственные конкурсы через удобный Mini App\n\nНажмите кнопку ниже, чтобы открыть приложение:`;
+        const templateText = botSettings.welcome_text || '👋 Привет, {first_name}!';
+        replyText = templateText.replace('{first_name}', firstName);
         replyMarkup = { inline_keyboard: buttons };
+
+        if (botSettings.welcome_photo_url) {
+          isPhotoMessage = true;
+        }
       }
     } else if (text.startsWith('/admin')) {
-      const adminUrl = `${baseMiniapp}/?admin=1`;
-      replyText = `⚙️ <b>Панель управления конкурсами</b>\n\nЗдесь вы можете:\n• Создавать новые розыгрыши с призовыми местами\n• Настраивать условия чек-листа (каналы, скриншоты)\n• Получать реферальные ссылки для участников\n• Управлять подпиской организатора\n\nНажмите кнопку ниже, чтобы открыть админку:`;
-      replyMarkup = {
-        inline_keyboard: [
-          [{ text: '📊 Открыть админ-панель', web_app: { url: adminUrl } }]
-        ]
-      };
+      if (userId === ADMIN_ID || String(userId) === String(ADMIN_ID)) {
+        const curPrice = botSettings.subscription_price_rub;
+        const hasPhoto = botSettings.welcome_photo_url ? 'Установлено ✅' : 'Не установлено ❌';
+        replyText = `⚙️ <b>Панель управления администратора</b>\n\n💵 <b>Цена подписки организатора:</b> ${curPrice}₽ / 30 дней\n🖼️ <b>Фото в приветствии:</b> ${hasPhoto}\n📝 <b>Текст приветствия:</b> настроен\n\nВы можете редактировать параметры прямо в этом чате или открыть конструктор конкурсов:`;
+        replyMarkup = {
+          inline_keyboard: [
+            [{ text: '✏️ Изменить текст приветствия', callback_data: 'adm_edit_text' }],
+            [{ text: '🖼️ Изменить фото приветствия', callback_data: 'adm_edit_photo' }],
+            [{ text: '💰 Изменить цену подписки', callback_data: 'adm_edit_price' }],
+            [{ text: '📊 Открыть админ-панель конкурсов', web_app: { url: `${baseMiniapp}/?admin=1` } }],
+          ]
+        };
+      } else {
+        replyText = '⛔ Данная команда доступна только администратору бота.';
+        replyMarkup = null;
+      }
     } else if (photo) {
       replyText = `📸 <b>Скриншот получен!</b>\n\nОн передан организаторам конкурса на ручную проверку. После подтверждения статус задания обновится в чек-листе Mini App.`;
       replyMarkup = {
@@ -544,7 +737,7 @@ async function handlePost(action: string, req: Request, res: Response) {
         ]
       };
     } else {
-      replyText = `👋 Чтобы принять участие в конкурсе или управлять розыгрышами, откройте Mini App:`;
+      replyText = `👋 Чтобы принять участие в конкурсе или управлять розыгрышами, откройте приложение:`;
       replyMarkup = {
         inline_keyboard: [
           [{ text: '🚀 Открыть приложение', web_app: { url: `${baseMiniapp}/` } }]
@@ -553,26 +746,25 @@ async function handlePost(action: string, req: Request, res: Response) {
     }
 
     if (chatId) {
-      const payload: any = {
-        chat_id: chatId,
-        text: replyText,
-        parse_mode: 'HTML',
-      };
-      if (replyMarkup) payload.reply_markup = replyMarkup;
-
-      // Async send directly to Telegram Bot API
-      sendTelegramApi('sendMessage', payload).catch(e => console.error(e));
-
-      // Also return in webhook payload for direct synchronous execution
-      return res.json({
-        method: 'sendMessage',
-        chat_id: chatId,
-        text: replyText,
-        parse_mode: 'HTML',
-        reply_markup: replyMarkup,
-      });
+      if (isPhotoMessage && botSettings.welcome_photo_url) {
+        sendTelegramApi('sendPhoto', {
+          chat_id: chatId,
+          photo: botSettings.welcome_photo_url,
+          caption: replyText,
+          parse_mode: 'HTML',
+          reply_markup: replyMarkup,
+        }).catch(e => console.error(e));
+      } else {
+        sendTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: replyText,
+          parse_mode: 'HTML',
+          reply_markup: replyMarkup,
+        }).catch(e => console.error(e));
+      }
     }
 
+    // Return plain ok to prevent duplicate message from Telegram webhook executor
     return res.json({ ok: true });
   }
 
@@ -696,8 +888,9 @@ async function handlePost(action: string, req: Request, res: Response) {
       });
     }
 
+    const botUser = await getCachedBotUsername();
     return res.json({
-      ref_link: `${MINIAPP_URL}?ref=${refCode}`,
+      ref_link: getContestShareLink(refCode, botUser),
       ref_code: refCode,
     });
   }

@@ -80,11 +80,73 @@ condition_checks = {}
 subscriptions = {ADMIN_ID: {"active": True, "lifetime": True, "expires_at": None}}
 payments = {}
 
+# Bot and System Settings editable by Admin directly in Telegram chat (outside Mini App)
+bot_settings = {
+    "welcome_text": (
+        "👋 <b>Привет, {first_name}!</b>\n\n"
+        "Добро пожаловать в Telegram-бота конкурсов и розыгрышей!\n\n"
+        "✨ <b>Возможности:</b>\n"
+        "• Участвуйте в розыгрышах ценных призов\n"
+        "• Выполняйте простые условия (подписка, активность, скриншоты)\n"
+        "• Создавайте свои собственные конкурсы через удобный Mini App\n\n"
+        "Нажмите кнопку ниже, чтобы открыть приложение:"
+    ),
+    "welcome_photo_url": "",
+    "subscription_price_rub": 390,
+    "bot_username": os.environ.get("BOT_USERNAME", ""),
+    "app_short_name": os.environ.get("APP_SHORT_NAME", "app"),
+}
+
+# State machine for admin interactive editing in bot chat: {chat_id: "waiting_welcome_text" | ...}
+admin_chat_states = {}
+
 next_contest_id = 2
 next_condition_id = 3
 next_participant_id = 1
 next_check_id = 1
 next_payment_id = 1
+
+
+def is_user_subscribed(user_id: int) -> bool:
+    if user_id == ADMIN_ID or str(user_id) == str(ADMIN_ID):
+        return True
+    sub = subscriptions.get(user_id)
+    if not sub:
+        return False
+    if sub.get("lifetime"):
+        return True
+    if not sub.get("active"):
+        return False
+    expires = sub.get("expires_at")
+    if not expires:
+        return False
+    try:
+        exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        return exp_dt > datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
+def get_cached_bot_username() -> str:
+    if bot_settings["bot_username"]:
+        return bot_settings["bot_username"]
+    token = os.environ.get("BOT_TOKEN") or BOT_TOKEN
+    if token:
+        me = send_telegram_api("getMe", {})
+        if me and me.get("ok") and me.get("result"):
+            uname = me["result"].get("username", "")
+            if uname:
+                bot_settings["bot_username"] = uname
+                return uname
+    return "RandomizerGiftRobot"
+
+
+def get_contest_share_link(ref_code: str) -> str:
+    uname = get_cached_bot_username()
+    app_short_name = bot_settings.get("app_short_name") or "app"
+    # Masked direct Telegram bot app link format, e.g. https://t.me/BotUsername/app?startapp=c_code
+    # Or deep link: https://t.me/BotUsername?start=c_code
+    return f"https://t.me/{uname}/{app_short_name}?startapp=c_{ref_code}"
 
 
 def get_user_id(init_data: str) -> int:
@@ -133,8 +195,8 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
             uid = get_user_id(init_data)
             return 200, {
                 "is_admin": uid == ADMIN_ID,
-                "subscribed": True,
-                "price_rub": SUBSCRIPTION_PRICE_RUB,
+                "subscribed": is_user_subscribed(uid),
+                "price_rub": bot_settings.get("subscription_price_rub", SUBSCRIPTION_PRICE_RUB),
             }
 
         if action == "contest":
@@ -189,14 +251,13 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
 
         if action == "list_contests":
             uid = get_user_id(init_data)
-            base_url = MINIAPP_URL.rstrip("/") if MINIAPP_URL else ""
             my_contests = [
                 {
                     "id": c["id"],
                     "title": c["title"],
                     "status": c["status"],
                     "deadline_at": c["deadline_at"],
-                    "ref_link": f"{base_url}/?ref={c['ref_code']}",
+                    "ref_link": get_contest_share_link(c["ref_code"]),
                 }
                 for c in contests.values()
                 if c["owner_user_id"] == uid
@@ -208,7 +269,95 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
     if method == "POST":
         if action == "telegram_webhook":
             update = body
+            callback_query = update.get("callback_query")
             message = update.get("message") or update.get("edited_message")
+
+            # Determine public domain
+            host = headers.get("x-forwarded-host") or headers.get("host") or ""
+            proto = headers.get("x-forwarded-proto") or "https"
+            if host and "localhost" not in host:
+                base_miniapp = f"{proto}://{host}"
+            else:
+                base_miniapp = MINIAPP_URL.rstrip("/")
+
+            # Handle Callback Query from Admin Panel in Telegram Chat
+            if callback_query:
+                cb_id = callback_query.get("id")
+                from_user = callback_query.get("from") or {}
+                user_id = from_user.get("id")
+                cb_message = callback_query.get("message") or {}
+                chat_id = cb_message.get("chat", {}).get("id")
+                cb_data = callback_query.get("data", "")
+
+                send_telegram_api("answerCallbackQuery", {"callback_query_id": cb_id})
+
+                if user_id != ADMIN_ID and str(user_id) != str(ADMIN_ID):
+                    send_telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "⛔ <b>Доступ запрещен:</b> только главный администратор бота может менять эти настройки.",
+                        "parse_mode": "HTML"
+                    })
+                    return 200, {"ok": True}
+
+                if cb_data == "adm_edit_text":
+                    admin_chat_states[chat_id] = "waiting_welcome_text"
+                    send_telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": (
+                            "✏️ <b>Отправьте новый текст приветствия</b> для команды /start.\n\n"
+                            "💡 <i>Вы можете использовать HTML-разметку и тег {first_name} для подстановки имени пользователя.</i>\n\n"
+                            "Для отмены отправьте /cancel"
+                        ),
+                        "parse_mode": "HTML"
+                    })
+                elif cb_data == "adm_edit_photo":
+                    admin_chat_states[chat_id] = "waiting_welcome_photo"
+                    send_telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": (
+                            "🖼️ <b>Отправьте изображение</b> (или прямую ссылку на фото), которое будет прикрепляться к приветствию.\n\n"
+                            "Отправьте <code>none</code>, чтобы убрать фото, или /cancel для отмены."
+                        ),
+                        "parse_mode": "HTML"
+                    })
+                elif cb_data == "adm_edit_price":
+                    admin_chat_states[chat_id] = "waiting_sub_price"
+                    send_telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": (
+                            "💰 <b>Введите новую стоимость подписки (в рублях)</b> для обычных пользователей:\n\n"
+                            f"Текущая цена: <b>{bot_settings['subscription_price_rub']}₽</b>\n\n"
+                            "Для отмены отправьте /cancel"
+                        ),
+                        "parse_mode": "HTML"
+                    })
+                elif cb_data == "adm_settings":
+                    cur_price = bot_settings["subscription_price_rub"]
+                    has_photo = "Установлено ✅" if bot_settings.get("welcome_photo_url") else "Не установлено ❌"
+                    panel_text = (
+                        "⚙️ <b>Панель управления настройками бота (Чат-режим)</b>\n\n"
+                        f"💵 <b>Цена подписки организатора:</b> {cur_price}₽ / 30 дней\n"
+                        f"🖼️ <b>Фото в приветствии:</b> {has_photo}\n"
+                        f"📝 <b>Текст приветствия:</b>\n<i>{bot_settings['welcome_text'][:120]}...</i>\n\n"
+                        "Выберите действие для редактирования:"
+                    )
+                    panel_kb = {
+                        "inline_keyboard": [
+                            [{"text": "✏️ Изменить текст приветствия", "callback_data": "adm_edit_text"}],
+                            [{"text": "🖼️ Изменить фото приветствия", "callback_data": "adm_edit_photo"}],
+                            [{"text": "💰 Изменить цену подписки", "callback_data": "adm_edit_price"}],
+                            [{"text": "🚀 Открыть конструктор (Mini App)", "web_app": {"url": f"{base_miniapp}/?admin=1"}}]
+                        ]
+                    }
+                    send_telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": panel_text,
+                        "parse_mode": "HTML",
+                        "reply_markup": panel_kb
+                    })
+
+                return 200, {"ok": True}
+
             if not message:
                 return 200, {"ok": True}
 
@@ -220,16 +369,81 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
             text = (message.get("text") or "").strip()
             photo = message.get("photo")
 
-            # Determine public domain
-            host = headers.get("x-forwarded-host") or headers.get("host") or ""
-            proto = headers.get("x-forwarded-proto") or "https"
-            if host and "localhost" not in host:
-                base_miniapp = f"{proto}://{host}"
-            else:
-                base_miniapp = MINIAPP_URL.rstrip("/")
+            # Check if admin is currently in a state waiting for input
+            admin_state = admin_chat_states.get(chat_id)
+            if admin_state and (user_id == ADMIN_ID or str(user_id) == str(ADMIN_ID)):
+                if text == "/cancel":
+                    admin_chat_states.pop(chat_id, None)
+                    send_telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "❌ Действие отменено.",
+                    })
+                    return 200, {"ok": True}
+
+                if admin_state == "waiting_welcome_text" and text:
+                    bot_settings["welcome_text"] = text
+                    admin_chat_states.pop(chat_id, None)
+                    send_telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "✅ <b>Текст приветствия успешно обновлен!</b>\n\nНовый текст будет отправляться всем пользователям при /start.",
+                        "parse_mode": "HTML"
+                    })
+                    return 200, {"ok": True}
+
+                if admin_state == "waiting_welcome_photo":
+                    admin_chat_states.pop(chat_id, None)
+                    if photo:
+                        file_id = photo[-1]["file_id"]
+                        bot_settings["welcome_photo_url"] = file_id
+                        send_telegram_api("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": "✅ <b>Фотография приветствия сохранена!</b> Теперь /start будет отправлять это изображение с подписью.",
+                            "parse_mode": "HTML"
+                        })
+                    elif text.lower() in ["none", "нет", "удалить"]:
+                        bot_settings["welcome_photo_url"] = ""
+                        send_telegram_api("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": "✅ <b>Фото приветствия удалено.</b> Приветствие снова будет отправляться текстом.",
+                            "parse_mode": "HTML"
+                        })
+                    elif text.startswith("http"):
+                        bot_settings["welcome_photo_url"] = text
+                        send_telegram_api("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": "✅ <b>Ссылка на фото сохранена!</b>",
+                            "parse_mode": "HTML"
+                        })
+                    else:
+                        send_telegram_api("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": "⚠️ Не распознано изображение. Попробуйте еще раз или напишите /cancel",
+                        })
+                    return 200, {"ok": True}
+
+                if admin_state == "waiting_sub_price":
+                    try:
+                        clean_num = int("".join([c for c in text if c.isdigit()]))
+                        if clean_num > 0:
+                            bot_settings["subscription_price_rub"] = clean_num
+                            admin_chat_states.pop(chat_id, None)
+                            send_telegram_api("sendMessage", {
+                                "chat_id": chat_id,
+                                "text": f"✅ <b>Стоимость подписки успешно изменена на {clean_num}₽!</b>",
+                                "parse_mode": "HTML"
+                            })
+                            return 200, {"ok": True}
+                    except Exception:
+                        pass
+                    send_telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "⚠️ Пожалуйста, введите корректное число (например: 490) или /cancel",
+                    })
+                    return 200, {"ok": True}
 
             reply_text = ""
             reply_markup = None
+            is_photo_message = False
 
             if text.startswith("/start"):
                 parts = text.split(maxsplit=1)
@@ -265,35 +479,38 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
                         [{"text": "🎁 Открыть конкурсы", "web_app": {"url": app_url}}]
                     ]
                     if user_id == ADMIN_ID or str(user_id) == str(ADMIN_ID):
-                        buttons.append([{"text": "⚙️ Создать конкурс (Админ)", "web_app": {"url": admin_url}}])
+                        buttons.append([{"text": "⚙️ Конструктор конкурсов (Admin)", "web_app": {"url": admin_url}}])
+                        buttons.append([{"text": "🛠️ Настройки бота (Цены, Текст, Фото)", "callback_data": "adm_settings"}])
 
-                    reply_text = (
-                        f"👋 <b>Привет, {first_name}!</b>\n\n"
-                        f"Добро пожаловать в Telegram-бота конкурсов и розыгрышей!\n\n"
-                        f"✨ <b>Возможности:</b>\n"
-                        f"• Участвуйте в розыгрышах ценных призов\n"
-                        f"• Выполняйте простые условия (подписка, активность, скриншоты)\n"
-                        f"• Создавайте свои собственные конкурсы через удобный Mini App\n\n"
-                        f"Нажмите кнопку ниже, чтобы открыть приложение:"
-                    )
+                    template_text = bot_settings.get("welcome_text") or "👋 Привет, {first_name}!"
+                    reply_text = template_text.replace("{first_name}", first_name)
                     reply_markup = {"inline_keyboard": buttons}
 
+                    if bot_settings.get("welcome_photo_url"):
+                        is_photo_message = True
+
             elif text.startswith("/admin"):
-                admin_url = f"{base_miniapp}/?admin=1"
-                reply_text = (
-                    "⚙️ <b>Панель управления конкурсами</b>\n\n"
-                    "Здесь вы можете:\n"
-                    "• Создавать новые розыгрыши с призовыми местами\n"
-                    "• Настраивать условия чек-листа (каналы, скриншоты)\n"
-                    "• Получать реферальные ссылки для участников\n"
-                    "• Управлять подпиской организатора\n\n"
-                    "Нажмите кнопку ниже, чтобы открыть админку:"
-                )
-                reply_markup = {
-                    "inline_keyboard": [
-                        [{"text": "📊 Открыть админ-панель", "web_app": {"url": admin_url}}]
-                    ]
-                }
+                if user_id == ADMIN_ID or str(user_id) == str(ADMIN_ID):
+                    cur_price = bot_settings["subscription_price_rub"]
+                    has_photo = "Установлено ✅" if bot_settings.get("welcome_photo_url") else "Не установлено ❌"
+                    reply_text = (
+                        "⚙️ <b>Панель управления администратора</b>\n\n"
+                        f"💵 <b>Цена подписки организатора:</b> {cur_price}₽ / 30 дней\n"
+                        f"🖼️ <b>Фото в приветствии:</b> {has_photo}\n"
+                        f"📝 <b>Текст приветствия:</b> настроен\n\n"
+                        "Вы можете редактировать параметры прямо в этом чате или открыть конструктор конкурсов:"
+                    )
+                    reply_markup = {
+                        "inline_keyboard": [
+                            [{"text": "✏️ Изменить текст приветствия", "callback_data": "adm_edit_text"}],
+                            [{"text": "🖼️ Изменить фото приветствия", "callback_data": "adm_edit_photo"}],
+                            [{"text": "💰 Изменить цену подписки", "callback_data": "adm_edit_price"}],
+                            [{"text": "📊 Открыть админ-панель конкурсов", "web_app": {"url": f"{base_miniapp}/?admin=1"}}]
+                        ]
+                    }
+                else:
+                    reply_text = "⛔ Данная команда доступна только администратору бота."
+                    reply_markup = None
 
             elif photo:
                 reply_text = (
@@ -309,7 +526,7 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
 
             else:
                 reply_text = (
-                    "👋 Чтобы принять участие в конкурсе или управлять розыгрышами, откройте Mini App:"
+                    "👋 Чтобы принять участие в конкурсе или управлять розыгрышами, откройте приложение:"
                 )
                 reply_markup = {
                     "inline_keyboard": [
@@ -318,26 +535,23 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
                 }
 
             if chat_id:
-                payload = {
-                    "chat_id": chat_id,
-                    "text": reply_text,
-                    "parse_mode": "HTML",
-                }
-                if reply_markup:
-                    payload["reply_markup"] = reply_markup
-                send_telegram_api("sendMessage", payload)
+                if is_photo_message and bot_settings.get("welcome_photo_url"):
+                    send_telegram_api("sendPhoto", {
+                        "chat_id": chat_id,
+                        "photo": bot_settings["welcome_photo_url"],
+                        "caption": reply_text,
+                        "parse_mode": "HTML",
+                        "reply_markup": reply_markup
+                    })
+                else:
+                    send_telegram_api("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": reply_text,
+                        "parse_mode": "HTML",
+                        "reply_markup": reply_markup
+                    })
 
-                # Also return response in webhook payload for direct Telegram execution
-                resp = {
-                    "method": "sendMessage",
-                    "chat_id": chat_id,
-                    "text": reply_text,
-                    "parse_mode": "HTML",
-                }
-                if reply_markup:
-                    resp["reply_markup"] = reply_markup
-                return 200, resp
-
+            # Return empty ok to prevent Telegram from executing a secondary sendMessage
             return 200, {"ok": True}
 
         if action == "check_condition":
@@ -381,6 +595,9 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
 
         if action == "create_contest":
             uid = get_user_id(init_data)
+            if not is_user_subscribed(uid):
+                return 402, {"error": "subscription required", "message": "Для создания конкурсов необходима подписка"}
+
             ref_code = secrets.token_hex(4)
             cid = next_contest_id
             next_contest_id += 1
@@ -420,8 +637,8 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
                     "sort_order": i,
                 }
 
-            base_url = MINIAPP_URL.rstrip("/") if MINIAPP_URL else ""
-            return 200, {"ref_link": f"{base_url}/?ref={ref_code}", "ref_code": ref_code}
+            bot_share_link = get_contest_share_link(ref_code)
+            return 200, {"ref_link": bot_share_link, "ref_code": ref_code}
 
         if action == "create_invoice":
             inv_id = f"inv_{secrets.token_hex(4)}"
