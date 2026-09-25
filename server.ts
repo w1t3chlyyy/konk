@@ -447,14 +447,132 @@ async function handleGet(action: string, req: Request, res: Response) {
   return res.status(404).json({ error: `unknown action: ${action}` });
 }
 
+async function sendTelegramApi(method: string, payload: any) {
+  if (!BOT_TOKEN) {
+    console.log('[Telegram API] Warning: BOT_TOKEN is not configured');
+    return null;
+  }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    return data;
+  } catch (err) {
+    console.error(`[Telegram API] Error calling ${method}:`, err);
+    return null;
+  }
+}
+
 async function handlePost(action: string, req: Request, res: Response) {
   const body = req.body || {};
   const initData = body.init_data || (req.query.init_data as string) || '';
 
   if (action === 'telegram_webhook') {
-    // Process Telegram webhook update
     const update = body;
-    console.log('Received Telegram update:', update?.update_id);
+    const message = update?.message || update?.edited_message;
+    if (!message) {
+      return res.json({ ok: true });
+    }
+
+    const chatId = message.chat?.id;
+    const fromUser = message.from || {};
+    const userId = fromUser.id || chatId;
+    const firstName = fromUser.first_name || 'Участник';
+    const text = (message.text || '').trim();
+    const photo = message.photo;
+
+    // Detect host dynamically
+    const forwardedHost = req.headers['x-forwarded-host'] as string;
+    const hostHeader = req.headers.host as string;
+    const host = forwardedHost || hostHeader || '';
+    const proto = (req.headers['x-forwarded-proto'] as string) || 'https';
+    const baseMiniapp = host && !host.includes('localhost') ? `${proto}://${host}` : MINIAPP_URL.replace(/\/$/, '');
+
+    let replyText = '';
+    let replyMarkup: any = null;
+
+    if (text.startsWith('/start')) {
+      const parts = text.split(/\s+/);
+      const refParam = parts.length > 1 ? parts[1].trim() : '';
+
+      let refCode = '';
+      if (refParam.startsWith('c_')) {
+        refCode = refParam.slice(2);
+      } else if (refParam.startsWith('ref_')) {
+        refCode = refParam.slice(4);
+      } else if (refParam) {
+        refCode = refParam;
+      }
+
+      if (refCode) {
+        const contestUrl = `${baseMiniapp}/?ref=${refCode}`;
+        replyText = `🎁 <b>Здравствуйте, ${firstName}!</b>\n\nВы приглашены к участию в розыгрыше призов!\n\nЧтобы подтвердить участие и побороться за ценные призы, нажмите на кнопку ниже и выполните условия чек-листа:`;
+        replyMarkup = {
+          inline_keyboard: [
+            [{ text: '🎉 Участвовать в конкурсе', web_app: { url: contestUrl } }]
+          ]
+        };
+      } else {
+        const appUrl = `${baseMiniapp}/`;
+        const adminUrl = `${baseMiniapp}/?admin=1`;
+        const buttons: any[] = [
+          [{ text: '🎁 Открыть конкурсы', web_app: { url: appUrl } }]
+        ];
+        if (userId === ADMIN_ID || String(userId) === String(ADMIN_ID)) {
+          buttons.push([{ text: '⚙️ Создать конкурс (Админ)', web_app: { url: adminUrl } }]);
+        }
+
+        replyText = `👋 <b>Привет, ${firstName}!</b>\n\nДобро пожаловать в Telegram-бота конкурсов и розыгрышей!\n\n✨ <b>Возможности:</b>\n• Участвуйте в розыгрышах ценных призов\n• Выполняйте простые условия (подписка, активность, скриншоты)\n• Создавайте свои собственные конкурсы через удобный Mini App\n\nНажмите кнопку ниже, чтобы открыть приложение:`;
+        replyMarkup = { inline_keyboard: buttons };
+      }
+    } else if (text.startsWith('/admin')) {
+      const adminUrl = `${baseMiniapp}/?admin=1`;
+      replyText = `⚙️ <b>Панель управления конкурсами</b>\n\nЗдесь вы можете:\n• Создавать новые розыгрыши с призовыми местами\n• Настраивать условия чек-листа (каналы, скриншоты)\n• Получать реферальные ссылки для участников\n• Управлять подпиской организатора\n\nНажмите кнопку ниже, чтобы открыть админку:`;
+      replyMarkup = {
+        inline_keyboard: [
+          [{ text: '📊 Открыть админ-панель', web_app: { url: adminUrl } }]
+        ]
+      };
+    } else if (photo) {
+      replyText = `📸 <b>Скриншот получен!</b>\n\nОн передан организаторам конкурса на ручную проверку. После подтверждения статус задания обновится в чек-листе Mini App.`;
+      replyMarkup = {
+        inline_keyboard: [
+          [{ text: '🔍 Открыть чек-лист в Mini App', web_app: { url: `${baseMiniapp}/` } }]
+        ]
+      };
+    } else {
+      replyText = `👋 Чтобы принять участие в конкурсе или управлять розыгрышами, откройте Mini App:`;
+      replyMarkup = {
+        inline_keyboard: [
+          [{ text: '🚀 Открыть приложение', web_app: { url: `${baseMiniapp}/` } }]
+        ]
+      };
+    }
+
+    if (chatId) {
+      const payload: any = {
+        chat_id: chatId,
+        text: replyText,
+        parse_mode: 'HTML',
+      };
+      if (replyMarkup) payload.reply_markup = replyMarkup;
+
+      // Async send directly to Telegram Bot API
+      sendTelegramApi('sendMessage', payload).catch(e => console.error(e));
+
+      // Also return in webhook payload for direct synchronous execution
+      return res.json({
+        method: 'sendMessage',
+        chat_id: chatId,
+        text: replyText,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup,
+      });
+    }
+
     return res.json({ ok: true });
   }
 

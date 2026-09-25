@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
@@ -13,6 +14,26 @@ default_miniapp_url = f"https://{vercel_url}" if vercel_url else "http://localho
 MINIAPP_URL = os.environ.get("MINIAPP_URL") or default_miniapp_url
 CRYPTOBOT_TOKEN = os.environ.get("CRYPTOBOT_TOKEN", "")
 SUBSCRIPTION_PRICE_RUB = 390
+
+def send_telegram_api(method: str, payload: dict):
+    token = os.environ.get("BOT_TOKEN") or BOT_TOKEN
+    if not token:
+        print("[Telegram API] Warning: BOT_TOKEN is not configured")
+        return None
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "ContestBot/1.0"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            res_bytes = resp.read()
+            return json.loads(res_bytes.decode("utf-8"))
+    except Exception as e:
+        print(f"[Telegram API] Error in {method}: {e}")
+        return None
 
 # In-memory stores
 contests = {
@@ -186,6 +207,137 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
 
     if method == "POST":
         if action == "telegram_webhook":
+            update = body
+            message = update.get("message") or update.get("edited_message")
+            if not message:
+                return 200, {"ok": True}
+
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            from_user = message.get("from") or {}
+            user_id = from_user.get("id") or chat_id
+            first_name = from_user.get("first_name", "Участник")
+            text = (message.get("text") or "").strip()
+            photo = message.get("photo")
+
+            # Determine public domain
+            host = headers.get("x-forwarded-host") or headers.get("host") or ""
+            proto = headers.get("x-forwarded-proto") or "https"
+            if host and "localhost" not in host:
+                base_miniapp = f"{proto}://{host}"
+            else:
+                base_miniapp = MINIAPP_URL.rstrip("/")
+
+            reply_text = ""
+            reply_markup = None
+
+            if text.startswith("/start"):
+                parts = text.split(maxsplit=1)
+                ref_param = parts[1].strip() if len(parts) > 1 else ""
+
+                ref_code = ""
+                if ref_param.startswith("c_"):
+                    ref_code = ref_param[2:]
+                elif ref_param.startswith("ref_"):
+                    ref_code = ref_param[4:]
+                elif ref_param:
+                    ref_code = ref_param
+
+                if ref_code:
+                    contest_url = f"{base_miniapp}/?ref={ref_code}"
+                    reply_text = (
+                        f"🎁 <b>Здравствуйте, {first_name}!</b>\n\n"
+                        f"Вы приглашены к участию в розыгрыше призов!\n\n"
+                        f"Чтобы подтвердить участие и побороться за ценные призы, "
+                        f"нажмите на кнопку ниже и выполните условия чек-листа:"
+                    )
+                    reply_markup = {
+                        "inline_keyboard": [
+                            [
+                                {"text": "🎉 Участвовать в конкурсе", "web_app": {"url": contest_url}}
+                            ]
+                        ]
+                    }
+                else:
+                    app_url = f"{base_miniapp}/"
+                    admin_url = f"{base_miniapp}/?admin=1"
+                    buttons = [
+                        [{"text": "🎁 Открыть конкурсы", "web_app": {"url": app_url}}]
+                    ]
+                    if user_id == ADMIN_ID or str(user_id) == str(ADMIN_ID):
+                        buttons.append([{"text": "⚙️ Создать конкурс (Админ)", "web_app": {"url": admin_url}}])
+
+                    reply_text = (
+                        f"👋 <b>Привет, {first_name}!</b>\n\n"
+                        f"Добро пожаловать в Telegram-бота конкурсов и розыгрышей!\n\n"
+                        f"✨ <b>Возможности:</b>\n"
+                        f"• Участвуйте в розыгрышах ценных призов\n"
+                        f"• Выполняйте простые условия (подписка, активность, скриншоты)\n"
+                        f"• Создавайте свои собственные конкурсы через удобный Mini App\n\n"
+                        f"Нажмите кнопку ниже, чтобы открыть приложение:"
+                    )
+                    reply_markup = {"inline_keyboard": buttons}
+
+            elif text.startswith("/admin"):
+                admin_url = f"{base_miniapp}/?admin=1"
+                reply_text = (
+                    "⚙️ <b>Панель управления конкурсами</b>\n\n"
+                    "Здесь вы можете:\n"
+                    "• Создавать новые розыгрыши с призовыми местами\n"
+                    "• Настраивать условия чек-листа (каналы, скриншоты)\n"
+                    "• Получать реферальные ссылки для участников\n"
+                    "• Управлять подпиской организатора\n\n"
+                    "Нажмите кнопку ниже, чтобы открыть админку:"
+                )
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "📊 Открыть админ-панель", "web_app": {"url": admin_url}}]
+                    ]
+                }
+
+            elif photo:
+                reply_text = (
+                    "📸 <b>Скриншот получен!</b>\n\n"
+                    "Он передан организаторам конкурса на ручную проверку. "
+                    "После подтверждения статус задания обновится в чек-листе Mini App."
+                )
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "🔍 Открыть чек-лист в Mini App", "web_app": {"url": f"{base_miniapp}/"}}]
+                    ]
+                }
+
+            else:
+                reply_text = (
+                    "👋 Чтобы принять участие в конкурсе или управлять розыгрышами, откройте Mini App:"
+                )
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "🚀 Открыть приложение", "web_app": {"url": f"{base_miniapp}/"}}]
+                    ]
+                }
+
+            if chat_id:
+                payload = {
+                    "chat_id": chat_id,
+                    "text": reply_text,
+                    "parse_mode": "HTML",
+                }
+                if reply_markup:
+                    payload["reply_markup"] = reply_markup
+                send_telegram_api("sendMessage", payload)
+
+                # Also return response in webhook payload for direct Telegram execution
+                resp = {
+                    "method": "sendMessage",
+                    "chat_id": chat_id,
+                    "text": reply_text,
+                    "parse_mode": "HTML",
+                }
+                if reply_markup:
+                    resp["reply_markup"] = reply_markup
+                return 200, resp
+
             return 200, {"ok": True}
 
         if action == "check_condition":
