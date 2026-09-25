@@ -78,50 +78,41 @@ def get_user_id(init_data: str) -> int:
     return ADMIN_ID
 
 
-class handler(BaseHTTPRequestHandler):
-    def _send_json(self, status: int, payload: dict):
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.end_headers()
-        self.wfile.write(body)
+def process_api_request(method: str, query_string: str, body_bytes: bytes, headers: dict) -> tuple[int, dict]:
+    global next_participant_id, next_contest_id, next_condition_id, next_check_id, next_payment_id
 
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.end_headers()
+    params = parse_qs(query_string)
+    action = params.get("action", [None])[0]
+    init_data = params.get("init_data", [""])[0]
 
-    def do_GET(self):
-        global next_participant_id
-        parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
-        action = params.get("action", [None])[0]
-        init_data = params.get("init_data", [""])[0]
+    body = {}
+    if body_bytes:
+        try:
+            body = json.loads(body_bytes.decode("utf-8"))
+            if not action:
+                action = body.get("action")
+            if not init_data:
+                init_data = body.get("init_data", "")
+        except Exception:
+            pass
 
+    if method == "OPTIONS":
+        return 204, {}
+
+    if method == "GET":
         if action == "cron":
-            auth = self.headers.get("authorization", "")
+            auth = headers.get("authorization", "")
             if CRON_SECRET and auth != f"Bearer {CRON_SECRET}":
-                self._send_json(401, {"error": "unauthorized"})
-                return
-            self._send_json(200, {"finalized": 0})
-            return
+                return 401, {"error": "unauthorized"}
+            return 200, {"finalized": 0}
 
         if action == "admin_status":
             uid = get_user_id(init_data)
-            self._send_json(
-                200,
-                {
-                    "is_admin": uid == ADMIN_ID,
-                    "subscribed": True,
-                    "price_rub": SUBSCRIPTION_PRICE_RUB,
-                },
-            )
-            return
+            return 200, {
+                "is_admin": uid == ADMIN_ID,
+                "subscribed": True,
+                "price_rub": SUBSCRIPTION_PRICE_RUB,
+            }
 
         if action == "contest":
             ref = params.get("ref", [""])[0]
@@ -129,8 +120,7 @@ class handler(BaseHTTPRequestHandler):
 
             contest = next((c for c in contests.values() if c["ref_code"] == ref and c["status"] == "active"), None)
             if not contest:
-                self._send_json(404, {"error": "contest not found"})
-                return
+                return 404, {"error": "contest not found"}
 
             cid = contest["id"]
             participant = next((p for p in participants.values() if p["contest_id"] == cid and p["user_id"] == uid), None)
@@ -154,29 +144,25 @@ class handler(BaseHTTPRequestHandler):
                 if chk["participant_id"] == participant["id"]
             }
 
-            self._send_json(
-                200,
-                {
-                    "contest": {
-                        "title": contest["title"],
-                        "description": contest["description"],
-                        "deadline_at": contest["deadline_at"],
-                    },
-                    "participant_id": participant["id"],
-                    "status": participant["status"],
-                    "conditions": [
-                        {
-                            "id": c["id"],
-                            "type": c["type"],
-                            "description": c["description"],
-                            "link": c.get("link"),
-                            "status": checks.get(c["id"], "pending"),
-                        }
-                        for c in conds
-                    ],
+            return 200, {
+                "contest": {
+                    "title": contest["title"],
+                    "description": contest["description"],
+                    "deadline_at": contest["deadline_at"],
                 },
-            )
-            return
+                "participant_id": participant["id"],
+                "status": participant["status"],
+                "conditions": [
+                    {
+                        "id": c["id"],
+                        "type": c["type"],
+                        "description": c["description"],
+                        "link": c.get("link"),
+                        "status": checks.get(c["id"], "pending"),
+                    }
+                    for c in conds
+                ],
+            }
 
         if action == "list_contests":
             uid = get_user_id(init_data)
@@ -192,41 +178,24 @@ class handler(BaseHTTPRequestHandler):
                 for c in contests.values()
                 if c["owner_user_id"] == uid
             ]
-            self._send_json(200, {"contests": my_contests})
-            return
+            return 200, {"contests": my_contests}
 
-        self._send_json(400, {"error": f"unknown action: {action}"})
+        return 400, {"error": f"unknown action: {action}"}
 
-    def do_POST(self):
-        global next_contest_id, next_condition_id, next_check_id, next_payment_id
-        parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
-        action = params.get("action", [None])[0]
-
-        length = int(self.headers.get("content-length", 0))
-        raw = self.rfile.read(length)
-        body = json.loads(raw or b"{}") if raw else {}
-        init_data = body.get("init_data", "") or params.get("init_data", [""])[0]
-
-        if not action:
-            action = body.get("action")
-
+    if method == "POST":
         if action == "telegram_webhook":
-            self._send_json(200, {"ok": True})
-            return
+            return 200, {"ok": True}
 
         if action == "check_condition":
             pid = int(body.get("participant_id", 0))
             cid = int(body.get("condition_id", 0))
             participant = participants.get(pid)
             if not participant:
-                self._send_json(404, {"error": "participant not found"})
-                return
+                return 404, {"error": "participant not found"}
 
             cond = conditions.get(cid)
             if not cond:
-                self._send_json(404, {"error": "condition not found"})
-                return
+                return 404, {"error": "condition not found"}
 
             new_status = "approved" if cond["type"] == "auto_channel_sub" else "awaiting_screenshot"
             chk = next(
@@ -254,8 +223,7 @@ class handler(BaseHTTPRequestHandler):
             if confirmed:
                 participant["status"] = "confirmed"
 
-            self._send_json(200, {"condition_status": new_status, "contest_confirmed": confirmed})
-            return
+            return 200, {"condition_status": new_status, "contest_confirmed": confirmed}
 
         if action == "create_contest":
             uid = get_user_id(init_data)
@@ -299,16 +267,77 @@ class handler(BaseHTTPRequestHandler):
                 }
 
             base_url = MINIAPP_URL.rstrip("/") if MINIAPP_URL else ""
-            self._send_json(200, {"ref_link": f"{base_url}/?ref={ref_code}", "ref_code": ref_code})
-            return
+            return 200, {"ref_link": f"{base_url}/?ref={ref_code}", "ref_code": ref_code}
 
         if action == "create_invoice":
             inv_id = f"inv_{secrets.token_hex(4)}"
-            self._send_json(200, {"pay_url": f"https://t.me/CryptoBot?start={inv_id}", "invoice_id": inv_id})
-            return
+            return 200, {"pay_url": f"https://t.me/CryptoBot?start={inv_id}", "invoice_id": inv_id}
 
         if action == "check_payment":
-            self._send_json(200, {"paid": True})
-            return
+            return 200, {"paid": True}
 
-        self._send_json(400, {"error": f"unknown action: {action}"})
+        return 400, {"error": f"unknown action: {action}"}
+
+    return 405, {"error": "method not allowed"}
+
+
+# --- WSGI callable for Vercel automatic detection (app) ---
+def app(environ, start_response):
+    method = environ.get("REQUEST_METHOD", "GET")
+    query_string = environ.get("QUERY_STRING", "")
+
+    content_length = int(environ.get("CONTENT_LENGTH") or 0)
+    body_bytes = environ["wsgi.input"].read(content_length) if content_length > 0 else b""
+
+    headers = {
+        "authorization": environ.get("HTTP_AUTHORIZATION", ""),
+        "content-type": environ.get("CONTENT_TYPE", ""),
+    }
+
+    status_code, result = process_api_request(method, query_string, body_bytes, headers)
+
+    body = json.dumps(result).encode("utf-8")
+    status_str = f"{status_code} OK" if status_code == 200 else f"{status_code} Error"
+
+    response_headers = [
+        ("Content-Type", "application/json"),
+        ("Access-Control-Allow-Origin", "*"),
+        ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+        ("Access-Control-Allow-Headers", "Content-Type, Authorization"),
+        ("Content-Length", str(len(body))),
+    ]
+    start_response(status_str, response_headers)
+    return [body]
+
+
+# --- BaseHTTPRequestHandler for legacy Vercel runtime (handler) ---
+class handler(BaseHTTPRequestHandler):
+    def _handle_all(self, method: str):
+        parsed = urlparse(self.path)
+        length = int(self.headers.get("content-length", 0))
+        body_bytes = self.rfile.read(length) if length > 0 else b""
+        headers = {
+            "authorization": self.headers.get("authorization", ""),
+            "content-type": self.headers.get("content-type", ""),
+        }
+
+        status, payload = process_api_request(method, parsed.query, body_bytes, headers)
+
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self._handle_all("OPTIONS")
+
+    def do_GET(self):
+        self._handle_all("GET")
+
+    def do_POST(self):
+        self._handle_all("POST")
