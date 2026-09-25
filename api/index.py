@@ -8,7 +8,9 @@ from urllib.parse import parse_qs, urlparse
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
-MINIAPP_URL = os.environ.get("MINIAPP_URL", "")
+vercel_url = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") or os.environ.get("VERCEL_URL")
+default_miniapp_url = f"https://{vercel_url}" if vercel_url else "http://localhost:3000"
+MINIAPP_URL = os.environ.get("MINIAPP_URL") or default_miniapp_url
 CRYPTOBOT_TOKEN = os.environ.get("CRYPTOBOT_TOKEN", "")
 SUBSCRIPTION_PRICE_RUB = 390
 
