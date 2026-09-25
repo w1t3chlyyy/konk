@@ -143,10 +143,10 @@ def get_cached_bot_username() -> str:
 
 def get_contest_share_link(ref_code: str) -> str:
     uname = get_cached_bot_username()
-    app_short_name = bot_settings.get("app_short_name") or "app"
-    # Masked direct Telegram bot app link format, e.g. https://t.me/BotUsername/app?startapp=c_code
-    # Or deep link: https://t.me/BotUsername?start=c_code
-    return f"https://t.me/{uname}/{app_short_name}?startapp=c_{ref_code}"
+    # Direct Telegram bot deep-link: https://t.me/BotUsername?start=c_code
+    # This guarantees 100% compatibility across all Telegram clients (Desktop, Web, iOS, Android)
+    # When user clicks, bot opens directly and sends special contest invite message with Mini App button
+    return f"https://t.me/{uname}?start=c_{ref_code}"
 
 
 def get_user_id(init_data: str) -> int:
@@ -203,9 +203,12 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
             ref = params.get("ref", [""])[0]
             uid = get_user_id(init_data)
 
-            contest = next((c for c in contests.values() if c["ref_code"] == ref and c["status"] == "active"), None)
+            contest = next((c for c in contests.values() if c["ref_code"] == ref), None)
             if not contest:
                 return 404, {"error": "contest not found"}
+
+            if contest.get("status") == "draft":
+                return 400, {"error": "contest in draft", "message": "Этот конкурс сохранён как черновик и ещё не опубликован организатором."}
 
             cid = contest["id"]
             participant = next((p for p in participants.values() if p["contest_id"] == cid and p["user_id"] == uid), None)
@@ -229,14 +232,30 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
                 if chk["participant_id"] == participant["id"]
             }
 
+            # Guaranteed win logic: all participants who completed conditions get a prize
+            prize_won = None
+            place_won = participant.get("assigned_place")
+            if participant["status"] == "confirmed" or contest["status"] == "finished":
+                c_places = [p for p in prize_places.values() if p["contest_id"] == cid]
+                if c_places:
+                    c_places.sort(key=lambda x: x["place_number"])
+                    if not place_won:
+                        place_won = 1
+                    matched_place = next((p for p in c_places if p["place_number"] == place_won), c_places[0])
+                    prize_won = matched_place["prize_text"]
+
             return 200, {
                 "contest": {
+                    "id": contest["id"],
                     "title": contest["title"],
                     "description": contest["description"],
                     "deadline_at": contest["deadline_at"],
+                    "status": contest["status"],
                 },
                 "participant_id": participant["id"],
                 "status": participant["status"],
+                "assigned_place": place_won,
+                "prize_won": prize_won,
                 "conditions": [
                     {
                         "id": c["id"],
@@ -458,17 +477,40 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
                     ref_code = ref_param
 
                 if ref_code:
+                    contest = next((c for c in contests.values() if c.get("ref_code") == ref_code), None)
                     contest_url = f"{base_miniapp}/?ref={ref_code}"
-                    reply_text = (
-                        f"🎁 <b>Здравствуйте, {first_name}!</b>\n\n"
-                        f"Вы приглашены к участию в розыгрыше призов!\n\n"
-                        f"Чтобы подтвердить участие и побороться за ценные призы, "
-                        f"нажмите на кнопку ниже и выполните условия чек-листа:"
-                    )
+                    
+                    if contest:
+                        c_title = contest.get("title", "Конкурс")
+                        c_desc = contest.get("description", "")
+                        c_id = contest.get("id")
+                        c_places = [p for p in prize_places.values() if p.get("contest_id") == c_id]
+                        places_str = ""
+                        if c_places:
+                            c_places.sort(key=lambda x: x.get("place_number", 1))
+                            lines = [f"• {p.get('place_number', 1)} место: {p.get('prize_text', '')}" for p in c_places]
+                            places_str = "\n🏆 <b>Призовые места:</b>\n" + "\n".join(lines) + "\n"
+
+                        desc_str = f"<i>{c_desc}</i>\n" if c_desc else ""
+                        reply_text = (
+                            f"🎉 <b>Здравствуйте, {first_name}!</b>\n\n"
+                            f"Вас пригласили принять участие в розыгрыше: <b>«{c_title}»</b>!\n\n"
+                            f"{desc_str}"
+                            f"{places_str}\n"
+                            f"📋 Выполните простые задания чек-листа в приложении конкурса, чтобы занять призовое место!"
+                        )
+                    else:
+                        reply_text = (
+                            f"🎁 <b>Здравствуйте, {first_name}!</b>\n\n"
+                            f"Вы приглашены к участию в розыгрыше призов!\n\n"
+                            f"Чтобы подтвердить участие и побороться за ценные призы, "
+                            f"нажмите на кнопку ниже и выполните условия чек-листа:"
+                        )
+
                     reply_markup = {
                         "inline_keyboard": [
                             [
-                                {"text": "🎉 Участвовать в конкурсе", "web_app": {"url": contest_url}}
+                                {"text": "🎯 Открыть условия и участвовать", "web_app": {"url": contest_url}}
                             ]
                         ]
                     }
@@ -598,6 +640,7 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
             if not is_user_subscribed(uid):
                 return 402, {"error": "subscription required", "message": "Для создания конкурсов необходима подписка"}
 
+            is_draft = bool(body.get("is_draft"))
             ref_code = secrets.token_hex(4)
             cid = next_contest_id
             next_contest_id += 1
@@ -609,7 +652,7 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
                 "owner_user_id": uid,
                 "title": body.get("title", "Новый конкурс"),
                 "description": body.get("description", ""),
-                "status": "active",
+                "status": "draft" if is_draft else "active",
                 "deadline_at": deadline,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -638,7 +681,24 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
                 }
 
             bot_share_link = get_contest_share_link(ref_code)
-            return 200, {"ref_link": bot_share_link, "ref_code": ref_code}
+            return 200, {
+                "contest_id": cid,
+                "status": contests[cid]["status"],
+                "ref_link": bot_share_link,
+                "ref_code": ref_code,
+            }
+
+        if action == "publish_contest":
+            uid = get_user_id(init_data)
+            cid = int(body.get("contest_id", 0))
+            contest = contests.get(cid)
+            if not contest or contest.get("owner_user_id") != uid:
+                return 404, {"error": "contest not found"}
+            contest["status"] = "active"
+            return 200, {
+                "ok": True,
+                "ref_link": get_contest_share_link(contest["ref_code"]),
+            }
 
         if action == "create_invoice":
             inv_id = f"inv_{secrets.token_hex(4)}"

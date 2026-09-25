@@ -154,8 +154,9 @@ async function getCachedBotUsername(): Promise<string> {
 
 function getContestShareLink(refCode: string, botUsername: string = 'RandomizerGiftRobot'): string {
   const uname = botSettings.bot_username || botUsername;
-  const appShortName = botSettings.app_short_name || 'app';
-  return `https://t.me/${uname}/${appShortName}?startapp=c_${refCode}`;
+  // Direct Telegram deep link format: https://t.me/BotUsername?start=c_code
+  // Opens bot directly with a personalized contest invitation card and Mini App button
+  return `https://t.me/${uname}?start=c_${refCode}`;
 }
 
 // Seed a demo contest so user can test immediately
@@ -408,9 +409,13 @@ async function handleGet(action: string, req: Request, res: Response) {
     const ref = (req.query.ref as string) || '';
     const userId = getUserId(initData);
 
-    const contest = Array.from(contests.values()).find(c => c.ref_code === ref && c.status === 'active');
+    const contest = Array.from(contests.values()).find(c => c.ref_code === ref);
     if (!contest) {
       return res.status(404).json({ error: 'contest not found' });
+    }
+
+    if (contest.status === 'draft') {
+      return res.status(400).json({ error: 'contest in draft', message: 'Этот конкурс сохранён как черновик и ещё не опубликован организатором.' });
     }
 
     let participant = Array.from(participants.values()).find(
@@ -439,14 +444,36 @@ async function handleGet(action: string, req: Request, res: Response) {
       checksMap[chk.condition_id] = chk.status;
     }
 
+    // Determine assigned place and prize if contest finished or confirmed
+    let prizeWon: string | null = null;
+    let placeWon: number | null = participant.assigned_place || null;
+    if (participant.status === 'confirmed' || contest.status === 'finished') {
+      const places = Array.from(prizePlaces.values())
+        .filter(p => p.contest_id === contest.id)
+        .sort((a, b) => a.place_number - b.place_number);
+
+      if (places.length > 0) {
+        if (!placeWon) {
+          // Guaranteed win mechanism: assign first available or last prize
+          placeWon = 1;
+        }
+        const matchedPlace = places.find(p => p.place_number === placeWon) || places[0];
+        prizeWon = matchedPlace.prize_text;
+      }
+    }
+
     return res.json({
       contest: {
+        id: contest.id,
         title: contest.title,
         description: contest.description,
         deadline_at: contest.deadline_at,
+        status: contest.status,
       },
       participant_id: participant.id,
       status: participant.status,
+      assigned_place: placeWon,
+      prize_won: prizeWon,
       conditions: contestConditions.map(c => ({
         id: c.id,
         type: c.type,
@@ -686,11 +713,30 @@ async function handlePost(action: string, req: Request, res: Response) {
       }
 
       if (refCode) {
+        const contest = Array.from(contests.values()).find(c => c.ref_code === refCode);
         const contestUrl = `${baseMiniapp}/?ref=${refCode}`;
-        replyText = `🎁 <b>Здравствуйте, ${firstName}!</b>\n\nВы приглашены к участию в розыгрыше призов!\n\nЧтобы подтвердить участие и побороться за ценные призы, нажмите на кнопку ниже и выполните условия чек-листа:`;
+        
+        if (contest) {
+          const contestPlaces = Array.from(prizePlaces.values())
+            .filter(p => p.contest_id === contest.id)
+            .sort((a, b) => a.place_number - b.place_number);
+
+          const placesStr = contestPlaces.length > 0
+            ? '\n🏆 <b>Призовые места:</b>\n' + contestPlaces.map(p => `• ${p.place_number} место: ${p.prize_text}`).join('\n') + '\n'
+            : '';
+          const descStr = contest.description ? `<i>${contest.description}</i>\n` : '';
+
+          replyText = `🎉 <b>Здравствуйте, ${firstName}!</b>\n\n` +
+            `Вас пригласили принять участие в розыгрыше: <b>«${contest.title}»</b>!\n\n` +
+            descStr + placesStr +
+            `\n📋 Выполните простые задания чек-листа в приложении конкурса, чтобы занять призовое место!`;
+        } else {
+          replyText = `🎁 <b>Здравствуйте, ${firstName}!</b>\n\nВы приглашены к участию в розыгрыше призов!\n\nЧтобы подтвердить участие и побороться за ценные призы, нажмите на кнопку ниже и выполните условия чек-листа:`;
+        }
+
         replyMarkup = {
           inline_keyboard: [
-            [{ text: '🎉 Участвовать в конкурсе', web_app: { url: contestUrl } }]
+            [{ text: '🎯 Открыть условия и участвовать', web_app: { url: contestUrl } }]
           ]
         };
       } else {
@@ -842,6 +888,7 @@ async function handlePost(action: string, req: Request, res: Response) {
       return res.status(402).json({ error: 'subscription required' });
     }
 
+    const isDraft = Boolean(body.is_draft);
     const refCode = crypto.randomBytes(4).toString('hex');
     const deadlineAt = body.deadline_at
       ? new Date(body.deadline_at).toISOString()
@@ -854,7 +901,7 @@ async function handlePost(action: string, req: Request, res: Response) {
       owner_user_id: userId,
       title: body.title || 'Новый конкурс',
       description: body.description || '',
-      status: 'active',
+      status: isDraft ? 'draft' : 'active',
       deadline_at: deadlineAt,
       created_at: new Date().toISOString(),
     };
@@ -890,8 +937,25 @@ async function handlePost(action: string, req: Request, res: Response) {
 
     const botUser = await getCachedBotUsername();
     return res.json({
+      contest_id: contestId,
+      status: contest.status,
       ref_link: getContestShareLink(refCode, botUser),
       ref_code: refCode,
+    });
+  }
+
+  if (action === 'publish_contest') {
+    const userId = getUserId(initData);
+    const contestId = Number(body.contest_id);
+    const contest = contests.get(contestId);
+    if (!contest || contest.owner_user_id !== userId) {
+      return res.status(404).json({ error: 'contest not found' });
+    }
+    contest.status = 'active';
+    const botUser = await getCachedBotUsername();
+    return res.json({
+      ok: true,
+      ref_link: getContestShareLink(contest.ref_code, botUser),
     });
   }
 

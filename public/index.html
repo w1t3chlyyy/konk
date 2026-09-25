@@ -244,15 +244,44 @@ async function renderContest(ref) {
   render(`<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>`);
   let data;
   try { data = await api("contest", { query: { ref } }); }
-  catch (e) { render(`<div class="card"><p>Не удалось загрузить конкурс: ${e.message}</p></div>`); return; }
+  catch (e) {
+    render(`
+      <div class="card">
+        <h1>Конкурс недоступен</h1>
+        <p>${e.message}</p>
+        <button class="btn secondary" style="margin-top:12px" onclick="renderAdmin()">В главное меню</button>
+      </div>
+    `);
+    return;
+  }
 
-  const { contest, conditions, status, participant_id } = data;
+  const { contest, conditions, status, participant_id, assigned_place, prize_won } = data;
   const confirmed = status === "confirmed";
+
+  let winBanner = "";
+  if (confirmed) {
+    if (prize_won) {
+      winBanner = `
+        <div class="card" style="background:linear-gradient(135deg, #e9fbf0, #d5f7e1);border:1px solid #a3edbe;text-align:center;padding:20px;margin-bottom:14px;">
+          <div style="font-size:36px;margin-bottom:6px;">🎉 🏆 🎁</div>
+          <h2 style="margin:0 0 6px;color:#15803d;font-size:18px;">Поздравляем! Вы победили!</h2>
+          <p style="color:#166534;font-size:15px;margin:0 0 8px;">Все участники, выполнившие условия, гарантированно получают призы!</p>
+          <div style="background:#ffffff;border-radius:12px;padding:12px;font-weight:700;color:var(--text);font-size:16px;box-shadow:0 2px 6px rgba(0,0,0,0.05);">
+            Ваш приз (${assigned_place || 1} место): <span style="color:var(--blue)">${prize_won}</span>
+          </div>
+          <p style="font-size:12.5px;color:#166534;margin-top:10px;">Организатор свяжется с вами в Telegram для вручения приза.</p>
+        </div>
+      `;
+    } else {
+      winBanner = `<div class="banner">${ICONS.party}<span>Вы успешно выполнили все условия и участвуете в розыгрыше! Каждый участник побеждает!</span></div>`;
+    }
+  }
 
   render(`
     <div class="hero">${ICONS.gift}<h1>${contest.title}</h1><p>${contest.description || ""}</p></div>
-    ${confirmed ? `<div class="banner">${ICONS.party}<span>Вы участвуете в конкурсе! Дождитесь подведения итогов.</span></div>` : ""}
+    ${winBanner}
     <h2>Условия участия</h2>
+    <p style="margin-bottom:12px;font-size:13px;color:var(--muted)">Выполните все пункты чек-листа ниже для подтверждения победы:</p>
     <div id="conds"></div>
   `);
 
@@ -265,7 +294,7 @@ async function renderContest(ref) {
         <div class="mark">${ICONS.check}</div>
         <div>
           <div class="cond-text">${c.description}</div>
-          ${c.status === "awaiting_screenshot" ? `<div class="cond-hint">Скриншот на проверке…</div>` : ""}
+          ${c.status === "awaiting_screenshot" ? `<div class="cond-hint">Скриншот на проверке организатором…</div>` : ""}
         </div>
       </div>
       ${c.link ? `<button class="btn link-btn" type="button">Выполнить ${ICONS.arrow}</button>` : ""}
@@ -280,7 +309,7 @@ async function renderContest(ref) {
         if (r.condition_status === "approved") {
           el.classList.add("approved");
         } else if (r.condition_status === "awaiting_screenshot") {
-          notify("Пришли скриншот прямо в чат с ботом — я проверю и отмечу условие.");
+          notify("Пришли скриншот прямо в чат с ботом — организатор проверит его и отметит.");
         } else if (r.condition_status === "not_subscribed") {
           notify("Не вижу подписки на канал — подпишись и нажми ещё раз.");
         }
@@ -337,20 +366,45 @@ async function renderAdmin() {
   list.contests.forEach(c => {
     const el = document.createElement("div");
     el.className = "card list-item";
+    const isDraft = c.status === "draft";
+    const statusBadge = isDraft 
+      ? `<span style="background:#fef3c7;color:#b45309;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;">Черновик</span>` 
+      : `<span style="background:#e9fbf0;color:#15803d;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;">Активен</span>`;
+
     el.innerHTML = `
-      <div>
-        <div class="title">${c.title}</div>
-        <div class="meta">${c.status} · до ${new Date(c.deadline_at).toLocaleString("ru-RU")}</div>
+      <div style="flex:1;margin-right:12px;">
+        <div style="display:flex;align-items:center;gap:6px;">
+          <div class="title">${c.title}</div>
+          ${statusBadge}
+        </div>
+        <div class="meta">${isDraft ? 'Не опубликован' : 'до ' + new Date(c.deadline_at).toLocaleString("ru-RU")}</div>
       </div>
-      <div style="display:flex;gap:10px;align-items:center;">
-        <a href="${c.ref_link}" class="muted-link" style="text-decoration:none">Открыть</a>
-        <button class="muted-link copy-btn" data-link="${c.ref_link}">Копировать</button>
+      <div style="display:flex;gap:8px;align-items:center;">
+        ${isDraft ? `<button class="btn publish-btn" style="padding:6px 12px;font-size:12px;width:auto;margin:0;" data-id="${c.id}">Опубликовать</button>` : `
+          <a href="${c.ref_link}" class="muted-link" style="text-decoration:none;font-size:13px;">Открыть</a>
+          <button class="muted-link copy-btn" data-link="${c.ref_link}" style="font-size:13px;">Копировать</button>
+        `}
       </div>
     `;
-    el.querySelector(".copy-btn").onclick = (e) => {
-      navigator.clipboard.writeText(e.target.dataset.link);
-      notify("Ссылка скопирована");
-    };
+    const copyBtn = el.querySelector(".copy-btn");
+    if (copyBtn) {
+      copyBtn.onclick = (e) => {
+        navigator.clipboard.writeText(e.target.dataset.link);
+        notify("Рабочая ссылка бота скопирована!");
+      };
+    }
+    const pubBtn = el.querySelector(".publish-btn");
+    if (pubBtn) {
+      pubBtn.onclick = async () => {
+        try {
+          await api("publish_contest", { method: "POST", body: { contest_id: c.id } });
+          notify("Конкурс успешно опубликован!");
+          renderAdmin();
+        } catch(err) {
+          notify("Ошибка публикации: " + err.message);
+        }
+      };
+    }
     listEl.appendChild(el);
   });
 
@@ -371,7 +425,7 @@ function renderCreateForm() {
     <input id="f-deadline" type="datetime-local">
 
     <h2>Призовые места</h2>
-    <p style="margin-bottom:10px">Победители распределяются автоматически поровну между всеми местами.</p>
+    <p style="margin-bottom:10px">⭐ Все участники, подтвердившие условия, гарантированно побеждают и получают призы!</p>
     <div id="places"></div>
     <button class="muted-link" id="add-place">+ Добавить место</button>
 
@@ -379,7 +433,11 @@ function renderCreateForm() {
     <div id="conditions"></div>
     <button class="muted-link" id="add-cond">+ Добавить условие</button>
 
-    <button class="btn" id="submit-btn">Создать конкурс</button>
+    <div style="display:flex;gap:10px;margin-top:16px;">
+      <button class="btn" id="submit-btn" style="flex:1;">🚀 Опубликовать</button>
+      <button class="btn secondary" id="draft-btn" style="flex:1;margin-top:8px;">💾 В черновики</button>
+    </div>
+    <button class="btn secondary" style="margin-top:8px;" onclick="renderAdmin()">Отмена</button>
   `);
 
   const placesEl = document.getElementById("places");
@@ -413,7 +471,7 @@ function renderCreateForm() {
   document.getElementById("add-place").onclick = () => addPlaceRow();
   document.getElementById("add-cond").onclick = () => addCondRow();
 
-  document.getElementById("submit-btn").onclick = async () => {
+  async function saveContest(isDraft = false) {
     const places = [...placesEl.children].map(r => ({
       place: parseInt(r.querySelector(".p-num").value || "1"),
       prize: r.querySelector(".p-prize").value,
@@ -432,30 +490,63 @@ function renderCreateForm() {
           title: document.getElementById("f-title").value,
           description: document.getElementById("f-desc").value,
           deadline_at: deadlineRaw,
+          is_draft: isDraft,
           places, conditions,
         },
       });
-      render(`
-        <div class="card">
-          <h1>Готово ✅</h1>
-          <p>Конкурс успешно создан! Ссылка для участников:</p>
-          <p style="word-break:break-all;font-weight:600;color:var(--blue);margin:8px 0;">${r.ref_link}</p>
-          <button class="btn" style="margin-top:12px" onclick="location.href='${r.ref_link}'">Перейти к конкурсу</button>
-          <button class="btn secondary" style="margin-top:8px" onclick="renderAdmin()">Вернуться в список</button>
-        </div>
-      `);
+      if (isDraft) {
+        render(`
+          <div class="card">
+            <h1>Сохранено в черновики 💾</h1>
+            <p>Конкурс успешно сохранён! Он не виден участникам, пока вы не нажмёте «Опубликовать» в списке ваших конкурсов.</p>
+            <button class="btn" style="margin-top:12px" onclick="renderAdmin()">Вернуться в список</button>
+          </div>
+        `);
+      } else {
+        render(`
+          <div class="card">
+            <h1>Готово ✅</h1>
+            <p>Конкурс опубликован! Рабочая реферальная ссылка в бота для участников:</p>
+            <p style="word-break:break-all;font-weight:600;color:var(--blue);margin:8px 0;">${r.ref_link}</p>
+            <button class="btn" style="margin-top:12px" onclick="location.href='${r.ref_link}'">Открыть в боте</button>
+            <button class="btn secondary" style="margin-top:8px" onclick="renderAdmin()">Вернуться в список</button>
+          </div>
+        `);
+      }
     } catch (e) {
-      if (e.message.includes("subscription")) { renderPaywall(renderCreateForm); }
+      if (e.message.includes("subscription")) { renderPaywall(() => renderCreateForm()); }
       else notify("Ошибка: " + e.message);
     }
-  };
+  }
+
+  document.getElementById("submit-btn").onclick = () => saveContest(false);
+  document.getElementById("draft-btn").onclick = () => saveContest(true);
 }
 
 // ===== Точка входа =====
 (function init() {
-  const ref = params.get("ref");
-  if (ref) renderContest(ref);
-  else renderAdmin();
+  // Support standard URL query param (?ref=...)
+  let ref = params.get("ref");
+
+  // Support Telegram Mini App direct link (?startapp=c_... or tg.initDataUnsafe.start_param)
+  if (!ref) {
+    const startAppParam = params.get("startapp") || params.get("tgWebAppStartParam") || tg?.initDataUnsafe?.start_param;
+    if (startAppParam) {
+      if (startAppParam.startsWith("c_")) ref = startAppParam.slice(2);
+      else if (startAppParam.startsWith("ref_")) ref = startAppParam.slice(4);
+      else ref = startAppParam;
+    }
+  }
+
+  // If ref is present or user is not explicitly admin via url, show contest
+  if (ref) {
+    renderContest(ref);
+  } else if (params.get("admin") === "1") {
+    renderAdmin();
+  } else {
+    // If opened directly without ref and not admin mode, also show contests list or admin
+    renderAdmin();
+  }
 })();
 </script>
 </body>
