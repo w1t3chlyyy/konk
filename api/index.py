@@ -77,15 +77,27 @@ def ensure_admin_subscription(cur):
     )
 
 
+SETTINGS_DEFAULTS = {
+    "welcome_text": "",
+    "welcome_photo_url": "",
+    "subscription_price_rub": 390,
+    "bot_username": "",
+}
+
+
 def get_settings(cur) -> dict:
+    """Always returns a dict with every expected key present, even if the
+    bot_settings table in the DB is missing a column (e.g. an older/partial
+    schema) or has no row yet."""
     cur.execute("select * from bot_settings where id = 1")
     row = cur.fetchone()
     if not row:
-        cur.execute(
-            "insert into bot_settings (id) values (1) returning *"
-        )
+        cur.execute("insert into bot_settings (id) values (1) returning *")
         row = cur.fetchone()
-    return dict(row)
+    settings = dict(SETTINGS_DEFAULTS)
+    if row:
+        settings.update({k: v for k, v in dict(row).items() if v is not None})
+    return settings
 
 
 def update_settings(cur, **fields):
