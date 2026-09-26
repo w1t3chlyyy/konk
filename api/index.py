@@ -384,8 +384,9 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
             return 405, {"error": "method not allowed"}
     except ApiError as e:
         return e.status, e.payload
-    except Exception as e:
-        print(f"[process_api_request] {method} action={action} error: {e}")
+    except Exception:
+        import traceback
+        print(f"[process_api_request] {method} action={action} error:\n{traceback.format_exc()}")
         return 500, {"error": "internal_error"}
 
 
