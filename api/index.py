@@ -230,11 +230,86 @@ def validate_init_data(init_data: str) -> dict | None:
         return None
 
 
-def get_verified_user_id(init_data: str) -> int:
+def get_verified_user(init_data: str) -> dict:
+    """Like get_verified_user_id, but returns the full Telegram user object
+    (id, username, first_name, ...) — used wherever we want a human-readable
+    name for organizer notifications."""
     user = validate_init_data(init_data)
     if not user or "id" not in user:
         raise ApiError(401, "invalid_init_data", "Telegram authentication failed")
-    return int(user["id"])
+    return user
+
+
+def get_verified_user_id(init_data: str) -> int:
+    return int(get_verified_user(init_data)["id"])
+
+
+def describe_user(user: dict) -> str:
+    if user.get("username"):
+        return f"@{user['username']}"
+    if user.get("first_name"):
+        return user["first_name"]
+    return f"id {user.get('id')}"
+
+
+def describe_telegram_user_by_id(user_id: int) -> str:
+    """Best-effort lookup for cases where we only have a bare user_id (e.g.
+    a callback triggered by reviewing a screenshot) and no cached username."""
+    try:
+        info = send_telegram_api("getChat", {"chat_id": user_id})
+        if info and info.get("ok"):
+            result = info["result"]
+            if result.get("username"):
+                return f"@{result['username']}"
+            if result.get("first_name"):
+                return result["first_name"]
+    except Exception:
+        pass
+    return f"id {user_id}"
+
+
+# ---------------------------------------------------------------------------
+# Organizer notifications (purely informational stats pings — failures here
+# must never break the actual request the participant is making)
+# ---------------------------------------------------------------------------
+def notify_new_participant(cur, contest: dict, who: str, user_id: int):
+    try:
+        cur.execute("select count(*) as n from participants where contest_id = %s", (contest["id"],))
+        total = cur.fetchone()["n"]
+        send_telegram_api("sendMessage", {
+            "chat_id": contest["owner_user_id"],
+            "text": (
+                f"👀 <b>Новый участник конкурса «{contest['title']}»</b>\n\n"
+                f"{who} (id {user_id}) открыл(а) чек-лист.\n\n"
+                f"Всего участников: <b>{total}</b>"
+            ),
+            "parse_mode": "HTML",
+        })
+    except Exception as e:
+        print(f"[notify_new_participant] {e}")
+
+
+def notify_participant_confirmed(cur, contest: dict, who: str, user_id: int):
+    try:
+        cur.execute("select count(*) as n from participants where contest_id = %s", (contest["id"],))
+        total = cur.fetchone()["n"]
+        cur.execute(
+            "select count(*) as n from participants where contest_id = %s and status = 'confirmed'",
+            (contest["id"],),
+        )
+        confirmed_n = cur.fetchone()["n"]
+        send_telegram_api("sendMessage", {
+            "chat_id": contest["owner_user_id"],
+            "text": (
+                f"✅ <b>Участник выполнил все условия!</b>\n\n"
+                f"Конкурс: «{contest['title']}»\n"
+                f"{who} (id {user_id})\n\n"
+                f"Подтверждено: <b>{confirmed_n}</b> из {total} участников"
+            ),
+            "parse_mode": "HTML",
+        })
+    except Exception as e:
+        print(f"[notify_participant_confirmed] {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +535,8 @@ def handle_get(cur, action, params, init_data, headers) -> tuple[int, dict]:
 
     if action == "contest":
         ref = params.get("ref", [""])[0]
-        uid = get_verified_user_id(init_data)
+        user = get_verified_user(init_data)
+        uid = int(user["id"])
 
         cur.execute("select * from contests where ref_code = %s", (ref,))
         contest = cur.fetchone()
@@ -482,6 +558,7 @@ def handle_get(cur, action, params, init_data, headers) -> tuple[int, dict]:
                 (contest["id"], uid),
             )
             participant = cur.fetchone()
+            notify_new_participant(cur, contest, describe_user(user), uid)
 
         cur.execute(
             "select * from conditions where contest_id = %s order by sort_order asc",
@@ -495,19 +572,23 @@ def handle_get(cur, action, params, init_data, headers) -> tuple[int, dict]:
         )
         checks = {row["condition_id"]: row["status"] for row in cur.fetchall()}
 
+        # A specific prize is only ever revealed once the contest has
+        # actually been finalized by the cron job (deadline reached, places
+        # distributed by finalize_contest). Before that, a confirmed
+        # participant only learns that they're "in" the giveaway — never a
+        # guessed place/prize that might not match what they actually get.
         prize_won = None
-        place_won = participant["assigned_place"]
-        if participant["status"] == "confirmed" or contest["status"] == "finished":
-            cur.execute(
-                "select * from prize_places where contest_id = %s order by place_number asc",
-                (contest["id"],),
-            )
-            c_places = cur.fetchall()
-            if c_places:
-                if not place_won:
-                    place_won = c_places[0]["place_number"]
-                matched = next((p for p in c_places if p["place_number"] == place_won), c_places[0])
-                prize_won = matched["prize_text"]
+        place_won = None
+        if contest["status"] == "finished" and participant["status"] == "confirmed":
+            place_won = participant["assigned_place"]
+            if place_won:
+                cur.execute(
+                    "select prize_text from prize_places where contest_id = %s and place_number = %s",
+                    (contest["id"], place_won),
+                )
+                matched = cur.fetchone()
+                if matched:
+                    prize_won = matched["prize_text"]
 
         return 200, {
             "contest": {
@@ -561,7 +642,8 @@ def handle_post(cur, action, body, init_data, headers) -> tuple[int, dict]:
         return handle_telegram_webhook(cur, body, headers)
 
     if action == "check_condition":
-        uid = get_verified_user_id(init_data)
+        user = get_verified_user(init_data)
+        uid = int(user["id"])
         pid = int(body.get("participant_id", 0))
         cid = int(body.get("condition_id", 0))
 
@@ -624,11 +706,16 @@ def handle_post(cur, action, body, init_data, headers) -> tuple[int, dict]:
         )
         approved = cur.fetchone()["n"]
         confirmed = total > 0 and approved >= total
-        if confirmed and participant["status"] != "confirmed":
+        newly_confirmed = confirmed and participant["status"] != "confirmed"
+        if newly_confirmed:
             cur.execute(
                 "update participants set status = 'confirmed', confirmed_at = now() where id = %s",
                 (pid,),
             )
+            cur.execute("select * from contests where id = %s", (participant["contest_id"],))
+            owner_contest = cur.fetchone()
+            if owner_contest:
+                notify_participant_confirmed(cur, owner_contest, describe_user(user), uid)
 
         return 200, {"condition_status": new_status, "contest_confirmed": confirmed}
 
@@ -753,7 +840,7 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
 
             cur.execute(
                 """select cc.id, cc.participant_id, p.contest_id, p.user_id as participant_user_id,
-                          c.owner_user_id, c.title as contest_title
+                          p.status as participant_status, c.owner_user_id, c.title as contest_title
                    from condition_checks cc
                    join participants p on p.id = cc.participant_id
                    join contests c on c.id = p.contest_id
@@ -782,12 +869,22 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
             )
             approved_n = cur.fetchone()["n"]
             confirmed = total > 0 and approved_n >= total
+            newly_confirmed = confirmed and row["participant_status"] != "confirmed"
             if confirmed:
                 cur.execute(
                     "update participants set status = 'confirmed', confirmed_at = now() "
                     "where id = %s and status != 'confirmed'",
                     (participant_id,),
                 )
+                if newly_confirmed:
+                    cur.execute("select * from contests where id = %s", (row["contest_id"],))
+                    owner_contest = cur.fetchone()
+                    if owner_contest:
+                        notify_participant_confirmed(
+                            cur, owner_contest,
+                            describe_telegram_user_by_id(row["participant_user_id"]),
+                            row["participant_user_id"],
+                        )
 
             verdict_emoji = "✅" if approve else "❌"
             verdict_text = "подтверждён" if approve else "отклонён"
