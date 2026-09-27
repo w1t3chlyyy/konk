@@ -182,6 +182,17 @@ def get_contest_share_link(cur, ref_code: str) -> str:
     return f"https://t.me/{uname}?start=c_{ref_code}"
 
 
+def get_contest_checklist_url(base_miniapp: str, ref_code: str | None) -> str:
+    """Deep-link straight into a specific contest's checklist screen inside
+    the Mini App (not the generic /list contests screen). Any "Открыть
+    чек-лист" button the bot sends must use this, not a bare base URL,
+    otherwise it opens the wrong page and the user has to navigate manually."""
+    base = base_miniapp.rstrip("/")
+    if ref_code:
+        return f"{base}/?ref={ref_code}"
+    return f"{base}/"
+
+
 def condition_status_for_client(condition: dict, db_status: str | None) -> str:
     """Maps the raw DB status of a condition_check row (or its absence) onto
     the status vocabulary the Mini App front-end understands, so state
@@ -840,7 +851,8 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
 
             cur.execute(
                 """select cc.id, cc.participant_id, p.contest_id, p.user_id as participant_user_id,
-                          p.status as participant_status, c.owner_user_id, c.title as contest_title
+                          p.status as participant_status, c.owner_user_id, c.title as contest_title,
+                          c.ref_code as contest_ref_code
                    from condition_checks cc
                    join participants p on p.id = cc.participant_id
                    join contests c on c.id = p.contest_id
@@ -898,6 +910,10 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
             except Exception as e:
                 print(f"[scr_review] editMessageCaption failed: {e}")
 
+            # Deep-link straight to this contest's checklist so the button
+            # actually opens the checklist that just changed — not the
+            # generic Mini App landing page.
+            checklist_url = get_contest_checklist_url(base_miniapp, row.get("contest_ref_code"))
             notify_text = (
                 f"✅ <b>Ваш скриншот по конкурсу «{row['contest_title']}» подтверждён!</b>"
                 if approve else
@@ -905,7 +921,12 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
                 f"Откройте чек-лист в приложении и отправьте другой скриншот."
             )
             send_telegram_api("sendMessage", {
-                "chat_id": row["participant_user_id"], "text": notify_text, "parse_mode": "HTML",
+                "chat_id": row["participant_user_id"],
+                "text": notify_text,
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": [[
+                    {"text": "🔍 Открыть чек-лист", "web_app": {"url": checklist_url}}
+                ]]},
             })
             if confirmed:
                 send_telegram_api("sendMessage", {
@@ -1051,7 +1072,7 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
         if ref_code:
             cur.execute("select * from contests where ref_code = %s", (ref_code,))
             contest = cur.fetchone()
-            contest_url = f"{base_miniapp}/?ref={ref_code}"
+            contest_url = get_contest_checklist_url(base_miniapp, ref_code)
             if contest:
                 cur.execute("select * from prize_places where contest_id = %s order by place_number", (contest["id"],))
                 c_places = cur.fetchall()
@@ -1104,6 +1125,9 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
                 "📸 <b>Скриншот получен!</b>\n\nНо я не понял, к какому условию он относится — "
                 "откройте чек-лист конкурса, нажмите «Выполнить» на нужном пункте и пришлите фото ещё раз."
             )
+            # We don't know which contest this belongs to, so there's no ref
+            # to deep-link to — send the user to the general Mini App screen
+            # to pick the contest themselves.
             reply_markup = {"inline_keyboard": [[{"text": "🔍 Открыть чек-лист", "web_app": {"url": f"{base_miniapp}/"}}]]}
         else:
             file_id = photo[-1]["file_id"]
@@ -1145,7 +1169,11 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
                 "📸 <b>Скриншот отправлен организатору на проверку!</b>\n\n"
                 "Статус обновится в чек-листе, как только его проверят."
             )
-            reply_markup = {"inline_keyboard": [[{"text": "🔍 Открыть чек-лист", "web_app": {"url": f"{base_miniapp}/"}}]]}
+            # Deep-link straight into this contest's checklist — previously
+            # this pointed at the bare Mini App URL, which opened the
+            # contests list instead of the checklist the user was just on.
+            checklist_url = get_contest_checklist_url(base_miniapp, contest["ref_code"] if contest else None)
+            reply_markup = {"inline_keyboard": [[{"text": "🔍 Открыть чек-лист", "web_app": {"url": checklist_url}}]]}
 
     else:
         reply_text = "👋 Чтобы принять участие в конкурсе или управлять розыгрышами, откройте приложение:"
