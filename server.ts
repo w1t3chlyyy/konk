@@ -77,6 +77,13 @@ interface ConditionCheck {
   reviewed_at?: string | null;
 }
 
+interface PendingScreenshot {
+  participantId: number;
+  conditionId: number;
+  contestId: number;
+  checkId: number;
+}
+
 interface AdminSubscription {
   user_id: number;
   active: boolean;
@@ -110,6 +117,10 @@ const participants = new Map<number, Participant>();
 const conditionChecks = new Map<number, ConditionCheck>();
 const subscriptions = new Map<number, AdminSubscription>();
 const payments = new Map<string, Payment>();
+// Tracks, per Telegram user, which (participant, condition) their *next*
+// photo message in the bot chat should be attached to. This is what makes
+// it possible to forward the screenshot to the right organizer for review.
+const pendingScreenshots = new Map<number, PendingScreenshot>();
 
 // Initialize default admin subscription
 subscriptions.set(ADMIN_ID, {
@@ -159,6 +170,38 @@ function getContestShareLink(refCode: string, botUsername: string = 'RandomizerG
   return `https://t.me/${uname}?start=c_${refCode}`;
 }
 
+function describeUser(user: { id: number; username?: string; first_name?: string }): string {
+  if (user.username) return `@${user.username}`;
+  if (user.first_name) return user.first_name;
+  return `id ${user.id}`;
+}
+
+function notifyNewParticipant(contest: Contest, who: string, userId: number) {
+  const total = Array.from(participants.values()).filter(p => p.contest_id === contest.id).length;
+  sendTelegramApi('sendMessage', {
+    chat_id: contest.owner_user_id,
+    text: `👀 <b>Новый участник конкурса «${contest.title}»</b>\n\n${who} (id ${userId}) открыл(а) чек-лист.\n\nВсего участников: <b>${total}</b>`,
+    parse_mode: 'HTML',
+  }).catch(console.error);
+}
+
+function notifyParticipantConfirmed(contest: Contest, who: string, userId: number) {
+  const total = Array.from(participants.values()).filter(p => p.contest_id === contest.id).length;
+  const confirmedN = Array.from(participants.values()).filter(p => p.contest_id === contest.id && p.status === 'confirmed').length;
+  sendTelegramApi('sendMessage', {
+    chat_id: contest.owner_user_id,
+    text: `✅ <b>Участник выполнил все условия!</b>\n\nКонкурс: «${contest.title}»\n${who} (id ${userId})\n\nПодтверждено: <b>${confirmedN}</b> из ${total} участников`,
+    parse_mode: 'HTML',
+  }).catch(console.error);
+}
+
+function conditionStatusForClient(condition: Condition, dbStatus: string | undefined): string {
+  if (dbStatus === 'approved') return 'approved';
+  if (dbStatus === 'rejected') return 'rejected';
+  if (dbStatus === 'pending' && condition.type === 'manual_screenshot') return 'awaiting_screenshot';
+  return 'pending';
+}
+
 // Seed a demo contest so user can test immediately
 const demoDeadline = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 const demoContestId = nextContestId++;
@@ -173,45 +216,25 @@ contests.set(demoContestId, {
   created_at: new Date().toISOString(),
 });
 
-prizePlaces.set(nextPrizePlaceId++, {
-  id: nextPrizePlaceId,
-  contest_id: demoContestId,
-  place_number: 1,
-  prize_text: 'iPhone 16 Pro 256GB',
-  capacity: 1,
-});
-prizePlaces.set(nextPrizePlaceId++, {
-  id: nextPrizePlaceId,
-  contest_id: demoContestId,
-  place_number: 2,
-  prize_text: 'Telegram Premium на 1 год',
-  capacity: 3,
-});
-prizePlaces.set(nextPrizePlaceId++, {
-  id: nextPrizePlaceId,
-  contest_id: demoContestId,
-  place_number: 3,
-  prize_text: 'Telegram Stars (1 000 ⭐)',
-  capacity: null,
-});
+// NOTE: `id: X++` in an object literal previously read the *post-increment*
+// value for the `id` field while using the *pre-increment* value as the Map
+// key, so every seeded place's own `.id` was silently off-by-one from the
+// key it was stored under. Assign the id to a local first to keep them in
+// sync.
+function addDemoPlace(contestId: number, placeNumber: number, prizeText: string, capacity: number | null) {
+  const id = nextPrizePlaceId++;
+  prizePlaces.set(id, { id, contest_id: contestId, place_number: placeNumber, prize_text: prizeText, capacity });
+}
+addDemoPlace(demoContestId, 1, 'iPhone 16 Pro 256GB', 1);
+addDemoPlace(demoContestId, 2, 'Telegram Premium на 1 год', 3);
+addDemoPlace(demoContestId, 3, 'Telegram Stars (1 000 ⭐)', null);
 
-conditions.set(nextConditionId++, {
-  id: 1,
-  contest_id: demoContestId,
-  type: 'auto_channel_sub',
-  description: 'Подписаться на новостной Telegram-канал',
-  channel_id: -1001234567890,
-  link: 'https://t.me/telegram',
-  sort_order: 0,
-});
-conditions.set(nextConditionId++, {
-  id: 2,
-  contest_id: demoContestId,
-  type: 'manual_screenshot',
-  description: 'Отправить скриншот репоста анонса',
-  link: 'https://t.me/durov',
-  sort_order: 1,
-});
+function addDemoCondition(contestId: number, type: Condition['type'], description: string, channelId: number | null, link: string | null, sortOrder: number) {
+  const id = nextConditionId++;
+  conditions.set(id, { id, contest_id: contestId, type, description, channel_id: channelId, link, sort_order: sortOrder });
+}
+addDemoCondition(demoContestId, 'auto_channel_sub', 'Подписаться на новостной Telegram-канал', -1001234567890, 'https://t.me/telegram', 0);
+addDemoCondition(demoContestId, 'manual_screenshot', 'Отправить скриншот репоста анонса', null, 'https://t.me/durov', 1);
 
 // --- Telegram Auth Validation ---
 function validateInitData(initData: string): { id: number; username?: string; first_name?: string } | null {
@@ -257,12 +280,16 @@ function validateInitData(initData: string): { id: number; username?: string; fi
   }
 }
 
-function getUserId(initData: string): number {
+function getVerifiedUser(initData: string): { id: number; username?: string; first_name?: string } {
   const user = validateInitData(initData || '');
   if (!user) {
     throw new Error('invalid init_data');
   }
-  return user.id;
+  return user;
+}
+
+function getUserId(initData: string): number {
+  return getVerifiedUser(initData).id;
 }
 
 function isSubscribed(userId: number): boolean {
@@ -407,7 +434,8 @@ async function handleGet(action: string, req: Request, res: Response) {
 
   if (action === 'contest') {
     const ref = (req.query.ref as string) || '';
-    const userId = getUserId(initData);
+    const user = getVerifiedUser(initData);
+    const userId = user.id;
 
     const contest = Array.from(contests.values()).find(c => c.ref_code === ref);
     if (!contest) {
@@ -430,6 +458,7 @@ async function handleGet(action: string, req: Request, res: Response) {
         joined_at: new Date().toISOString(),
       };
       participants.set(participant.id, participant);
+      notifyNewParticipant(contest, describeUser(user), userId);
     }
 
     const contestConditions = Array.from(conditions.values())
@@ -444,21 +473,18 @@ async function handleGet(action: string, req: Request, res: Response) {
       checksMap[chk.condition_id] = chk.status;
     }
 
-    // Determine assigned place and prize if contest finished or confirmed
+    // A specific prize is only ever revealed once the contest has actually
+    // been finalized (finalizeContest, run by the cron job at the deadline)
+    // — before that, a confirmed participant only learns that they're "in",
+    // never a guessed place/prize that might not match the real outcome.
     let prizeWon: string | null = null;
-    let placeWon: number | null = participant.assigned_place || null;
-    if (participant.status === 'confirmed' || contest.status === 'finished') {
-      const places = Array.from(prizePlaces.values())
-        .filter(p => p.contest_id === contest.id)
-        .sort((a, b) => a.place_number - b.place_number);
-
-      if (places.length > 0) {
-        if (!placeWon) {
-          // Guaranteed win mechanism: assign first available or last prize
-          placeWon = 1;
-        }
-        const matchedPlace = places.find(p => p.place_number === placeWon) || places[0];
-        prizeWon = matchedPlace.prize_text;
+    let placeWon: number | null = null;
+    if (contest.status === 'finished' && participant.status === 'confirmed') {
+      placeWon = participant.assigned_place || null;
+      if (placeWon) {
+        const places = Array.from(prizePlaces.values()).filter(p => p.contest_id === contest.id);
+        const matchedPlace = places.find(p => p.place_number === placeWon);
+        if (matchedPlace) prizeWon = matchedPlace.prize_text;
       }
     }
 
@@ -479,7 +505,7 @@ async function handleGet(action: string, req: Request, res: Response) {
         type: c.type,
         description: c.description,
         link: c.link || null,
-        status: checksMap[c.id] || 'pending',
+        status: conditionStatusForClient(c, checksMap[c.id]),
       })),
     });
   }
@@ -557,6 +583,65 @@ async function handlePost(action: string, req: Request, res: Response) {
       const cbMsg = callbackQuery.message || {};
       const cbChatId = cbMsg.chat?.id;
       const cbData = callbackQuery.data || '';
+
+      // --- Screenshot review: any contest owner can review their own
+      // contest's screenshots, not just the global bot owner ---
+      if (cbData.startsWith('scr_ok:') || cbData.startsWith('scr_no:')) {
+        const approve = cbData.startsWith('scr_ok:');
+        const checkId = Number(cbData.split(':')[1]);
+
+        sendTelegramApi('answerCallbackQuery', { callback_query_id: cbId }).catch(console.error);
+
+        const check = conditionChecks.get(checkId);
+        const participant = check ? participants.get(check.participant_id) : undefined;
+        const contest = participant ? contests.get(participant.contest_id) : undefined;
+
+        if (!check || !participant || !contest) {
+          return res.json({ ok: true });
+        }
+        if (String(cbUserId) !== String(contest.owner_user_id) && String(cbUserId) !== String(ADMIN_ID)) {
+          return res.json({ ok: true });
+        }
+
+        check.status = approve ? 'approved' : 'rejected';
+        check.reviewed_at = new Date().toISOString();
+
+        const allConds = Array.from(conditions.values()).filter(c => c.contest_id === contest.id);
+        const allApproved = Array.from(conditionChecks.values())
+          .filter(c => c.participant_id === participant.id && c.status === 'approved');
+        const confirmed = allConds.length > 0 && allApproved.length >= allConds.length;
+        if (confirmed && participant.status !== 'confirmed') {
+          participant.status = 'confirmed';
+          participant.confirmed_at = new Date().toISOString();
+        }
+
+        const verdictEmoji = approve ? '✅' : '❌';
+        const verdictText = approve ? 'подтверждён' : 'отклонён';
+        sendTelegramApi('editMessageCaption', {
+          chat_id: cbChatId,
+          message_id: cbMsg.message_id,
+          caption: `${cbMsg.caption || ''}\n\n${verdictEmoji} Скриншот ${verdictText}`,
+          parse_mode: 'HTML',
+        }).catch(console.error);
+
+        sendTelegramApi('sendMessage', {
+          chat_id: participant.user_id,
+          text: approve
+            ? `✅ <b>Ваш скриншот по конкурсу «${contest.title}» подтверждён!</b>`
+            : `❌ <b>Скриншот по конкурсу «${contest.title}» отклонён организатором.</b>\n\nОткройте чек-лист и отправьте другой скриншот.`,
+          parse_mode: 'HTML',
+        }).catch(console.error);
+
+        if (confirmed) {
+          sendTelegramApi('sendMessage', {
+            chat_id: participant.user_id,
+            text: '🎉 <b>Все условия выполнены — вы участвуете в розыгрыше!</b>',
+            parse_mode: 'HTML',
+          }).catch(console.error);
+        }
+
+        return res.json({ ok: true });
+      }
 
       sendTelegramApi('answerCallbackQuery', { callback_query_id: cbId }).catch(console.error);
 
@@ -715,7 +800,7 @@ async function handlePost(action: string, req: Request, res: Response) {
       if (refCode) {
         const contest = Array.from(contests.values()).find(c => c.ref_code === refCode);
         const contestUrl = `${baseMiniapp}/?ref=${refCode}`;
-        
+
         if (contest) {
           const contestPlaces = Array.from(prizePlaces.values())
             .filter(p => p.contest_id === contest.id)
@@ -776,12 +861,53 @@ async function handlePost(action: string, req: Request, res: Response) {
         replyMarkup = null;
       }
     } else if (photo) {
-      replyText = `📸 <b>Скриншот получен!</b>\n\nОн передан организаторам конкурса на ручную проверку. После подтверждения статус задания обновится в чек-листе Mini App.`;
-      replyMarkup = {
-        inline_keyboard: [
-          [{ text: '🔍 Открыть чек-лист в Mini App', web_app: { url: `${baseMiniapp}/` } }]
-        ]
-      };
+      // Look up which (participant, condition) this user last clicked
+      // "Выполнить" for. This is what lets us forward the screenshot to the
+      // right organizer instead of the message just vanishing.
+      const pending = pendingScreenshots.get(userId);
+
+      if (!pending) {
+        replyText = `📸 <b>Скриншот получен!</b>\n\nНо я не понял, к какому условию он относится — откройте чек-лист конкурса, нажмите «Выполнить» на нужном пункте и пришлите фото ещё раз.`;
+        replyMarkup = {
+          inline_keyboard: [
+            [{ text: '🔍 Открыть чек-лист в Mini App', web_app: { url: `${baseMiniapp}/` } }]
+          ]
+        };
+      } else {
+        const fileId = photo[photo.length - 1].file_id;
+        const check = conditionChecks.get(pending.checkId);
+        if (check) {
+          check.file_id = fileId;
+          check.status = 'pending';
+          check.reviewed_at = null;
+        }
+        pendingScreenshots.delete(userId);
+
+        const contest = contests.get(pending.contestId);
+        const condition = conditions.get(pending.conditionId);
+        if (contest && condition && check) {
+          const usernamePart = fromUser.username ? `@${fromUser.username}` : firstName;
+          sendTelegramApi('sendPhoto', {
+            chat_id: contest.owner_user_id,
+            photo: fileId,
+            caption: `🕵️ <b>Новый скриншот на проверку</b>\n\nКонкурс: <b>${contest.title}</b>\nУсловие: ${condition.description}\nУчастник: ${usernamePart} (id ${userId})`,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '✅ Подтвердить', callback_data: `scr_ok:${check.id}` },
+                { text: '❌ Отклонить', callback_data: `scr_no:${check.id}` },
+              ]]
+            },
+          }).catch(console.error);
+        }
+
+        replyText = `📸 <b>Скриншот отправлен организатору на проверку!</b>\n\nСтатус обновится в чек-листе, как только его проверят.`;
+        replyMarkup = {
+          inline_keyboard: [
+            [{ text: '🔍 Открыть чек-лист в Mini App', web_app: { url: `${baseMiniapp}/` } }]
+          ]
+        };
+      }
     } else {
       replyText = `👋 Чтобы принять участие в конкурсе или управлять розыгрышами, откройте приложение:`;
       replyMarkup = {
@@ -815,7 +941,8 @@ async function handlePost(action: string, req: Request, res: Response) {
   }
 
   if (action === 'check_condition') {
-    const userId = getUserId(initData);
+    const user = getVerifiedUser(initData);
+    const userId = user.id;
     const participantId = Number(body.participant_id);
     const conditionId = Number(body.condition_id);
 
@@ -861,7 +988,21 @@ async function handlePost(action: string, req: Request, res: Response) {
           status: 'pending',
         };
         conditionChecks.set(check.id, check);
+      } else if (check.status !== 'approved') {
+        // Re-arm on every click: a previously 'rejected' item goes back to
+        // 'pending' so the user can resend a fresh screenshot. Previously
+        // this branch didn't exist at all, so a rejected item could never
+        // be resubmitted.
+        check.status = 'pending';
       }
+      // Remember which (participant, condition) this user's next photo
+      // message belongs to.
+      pendingScreenshots.set(userId, {
+        participantId,
+        conditionId,
+        contestId: participant.contest_id,
+        checkId: check.id,
+      });
     }
 
     // Check if all conditions approved
