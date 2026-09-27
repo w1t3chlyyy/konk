@@ -274,7 +274,7 @@ async function renderContest(ref) {
         <div class="card" style="background:linear-gradient(135deg, #e9fbf0, #d5f7e1);border:1px solid #a3edbe;text-align:center;padding:20px;margin-bottom:14px;">
           <div style="font-size:36px;margin-bottom:6px;">🎉 🏆 🎁</div>
           <h2 style="margin:0 0 6px;color:#15803d;font-size:18px;">Поздравляем! Вы победили!</h2>
-          <p style="color:#166534;font-size:15px;margin:0 0 8px;">Все участники, выполнившие условия, гарантированно получают призы!</p>
+          <p style="color:#166534;font-size:15px;margin:0 0 8px;"></p>
           <div style="background:#ffffff;border-radius:12px;padding:12px;font-weight:700;color:var(--text);font-size:16px;box-shadow:0 2px 6px rgba(0,0,0,0.05);">
             Ваш приз (${assigned_place || 1} место): <span style="color:var(--blue)">${prize_won}</span>
           </div>
@@ -282,7 +282,7 @@ async function renderContest(ref) {
         </div>
       `;
     } else {
-      winBanner = `<div class="banner">${ICONS.party}<span>Вы успешно выполнили все условия и участвуете в розыгрыше! Каждый участник побеждает!</span></div>`;
+      winBanner = `<div class="banner">${ICONS.party}<span>Вы успешно выполнили все условия и участвуете в розыгрыше!</span></div>`;
     }
   }
 
@@ -290,7 +290,7 @@ async function renderContest(ref) {
     <div class="hero">${ICONS.gift}<h1>${contest.title}</h1><p>${contest.description || ""}</p></div>
     ${winBanner}
     <h2>Условия участия</h2>
-    <p style="margin-bottom:12px;font-size:13px;color:var(--muted)">Выполните все пункты чек-листа ниже для подтверждения победы:</p>
+    <p style="margin-bottom:12px;font-size:13px;color:var(--muted)">Выполните все пункты чек-листа ниже для подтверждения участия:</p>
     <div id="conds"></div>
   `);
 
