@@ -170,6 +170,15 @@ function getContestShareLink(refCode: string, botUsername: string = 'RandomizerG
   return `https://t.me/${uname}?start=c_${refCode}`;
 }
 
+// Deep-link straight into a specific contest's checklist screen inside the
+// Mini App (not the generic /list contests screen). Any "Открыть чек-лист"
+// button the bot sends must use this, not a bare base URL — otherwise it
+// opens the wrong page and the user has to navigate to the contest by hand.
+function getContestChecklistUrl(baseMiniapp: string, refCode: string | null | undefined): string {
+  const base = baseMiniapp.replace(/\/$/, '');
+  return refCode ? `${base}/?ref=${refCode}` : `${base}/`;
+}
+
 function describeUser(user: { id: number; username?: string; first_name?: string }): string {
   if (user.username) return `@${user.username}`;
   if (user.first_name) return user.first_name;
@@ -624,12 +633,20 @@ async function handlePost(action: string, req: Request, res: Response) {
           parse_mode: 'HTML',
         }).catch(console.error);
 
+        // Deep-link straight to this contest's checklist so the button
+        // actually opens the checklist that just changed, not the generic
+        // Mini App landing page.
+        const checklistUrl = getContestChecklistUrl(baseMiniapp, contest.ref_code);
+
         sendTelegramApi('sendMessage', {
           chat_id: participant.user_id,
           text: approve
             ? `✅ <b>Ваш скриншот по конкурсу «${contest.title}» подтверждён!</b>`
             : `❌ <b>Скриншот по конкурсу «${contest.title}» отклонён организатором.</b>\n\nОткройте чек-лист и отправьте другой скриншот.`,
           parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🔍 Открыть чек-лист', web_app: { url: checklistUrl } }]],
+          },
         }).catch(console.error);
 
         if (confirmed) {
@@ -799,7 +816,7 @@ async function handlePost(action: string, req: Request, res: Response) {
 
       if (refCode) {
         const contest = Array.from(contests.values()).find(c => c.ref_code === refCode);
-        const contestUrl = `${baseMiniapp}/?ref=${refCode}`;
+        const contestUrl = getContestChecklistUrl(baseMiniapp, refCode);
 
         if (contest) {
           const contestPlaces = Array.from(prizePlaces.values())
@@ -868,6 +885,8 @@ async function handlePost(action: string, req: Request, res: Response) {
 
       if (!pending) {
         replyText = `📸 <b>Скриншот получен!</b>\n\nНо я не понял, к какому условию он относится — откройте чек-лист конкурса, нажмите «Выполнить» на нужном пункте и пришлите фото ещё раз.`;
+        // We don't know which contest this belongs to, so there's no ref to
+        // deep-link to — send the user to the general Mini App screen.
         replyMarkup = {
           inline_keyboard: [
             [{ text: '🔍 Открыть чек-лист в Mini App', web_app: { url: `${baseMiniapp}/` } }]
@@ -902,9 +921,13 @@ async function handlePost(action: string, req: Request, res: Response) {
         }
 
         replyText = `📸 <b>Скриншот отправлен организатору на проверку!</b>\n\nСтатус обновится в чек-листе, как только его проверят.`;
+        // Deep-link straight into this contest's checklist — previously
+        // this pointed at the bare Mini App URL, opening the contests list
+        // instead of the checklist the user was just filling in.
+        const checklistUrl = getContestChecklistUrl(baseMiniapp, contest?.ref_code);
         replyMarkup = {
           inline_keyboard: [
-            [{ text: '🔍 Открыть чек-лист в Mini App', web_app: { url: `${baseMiniapp}/` } }]
+            [{ text: '🔍 Открыть чек-лист в Mini App', web_app: { url: checklistUrl } }]
           ]
         };
       }
