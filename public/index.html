@@ -15,6 +15,7 @@
     --blue-light: #eaf1ff;
     --green: #22c55e;
     --green-light: #e9fbf0;
+    --red: #ef4444;
     --text: #14213d;
     --muted: #7c8aa5;
     --bg: #ffffff;
@@ -85,6 +86,10 @@
     background: var(--green-light);
     border-color: #bdf0cf;
   }
+  .condition.rejected {
+    background: #fef2f2;
+    border-color: #fecaca;
+  }
   .cond-top {
     display: flex;
     align-items: center;
@@ -104,6 +109,9 @@
     border-color: var(--green);
     transform: scale(1.05);
   }
+  .condition.rejected .mark {
+    border-color: var(--red);
+  }
   .mark svg { width: 14px; height: 14px; }
   .mark path {
     stroke: #fff;
@@ -122,6 +130,7 @@
   }
   .cond-text { font-size: 14.5px; line-height: 1.4; flex: 1; }
   .cond-hint { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .cond-hint.rejected { color: #dc2626; font-weight: 600; }
 
   .banner {
     display: flex;
@@ -288,13 +297,16 @@ async function renderContest(ref) {
   const condsEl = document.getElementById("conds");
   conditions.forEach(c => {
     const el = document.createElement("div");
-    el.className = "condition" + (c.status === "approved" ? " approved" : "");
+    el.className = "condition"
+      + (c.status === "approved" ? " approved" : "")
+      + (c.status === "rejected" ? " rejected" : "");
     el.innerHTML = `
       <div class="cond-top">
         <div class="mark">${ICONS.check}</div>
         <div>
           <div class="cond-text">${c.description}</div>
           ${c.status === "awaiting_screenshot" ? `<div class="cond-hint">Скриншот на проверке организатором…</div>` : ""}
+          ${c.status === "rejected" ? `<div class="cond-hint rejected">Скриншот отклонён — пришлите другой в чат с ботом</div>` : ""}
         </div>
       </div>
       ${c.link ? `<button class="btn link-btn" type="button">Выполнить ${ICONS.arrow}</button>` : ""}
@@ -307,8 +319,10 @@ async function renderContest(ref) {
           body: { participant_id, condition_id: c.id },
         });
         if (r.condition_status === "approved") {
+          el.classList.remove("rejected");
           el.classList.add("approved");
         } else if (r.condition_status === "awaiting_screenshot") {
+          el.classList.remove("rejected");
           notify("Пришли скриншот прямо в чат с ботом — организатор проверит его и отметит.");
         } else if (r.condition_status === "not_subscribed") {
           notify("Не вижу подписки на канал — подпишись и нажми ещё раз.");
@@ -367,8 +381,8 @@ async function renderAdmin() {
     const el = document.createElement("div");
     el.className = "card list-item";
     const isDraft = c.status === "draft";
-    const statusBadge = isDraft 
-      ? `<span style="background:#fef3c7;color:#b45309;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;">Черновик</span>` 
+    const statusBadge = isDraft
+      ? `<span style="background:#fef3c7;color:#b45309;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;">Черновик</span>`
       : `<span style="background:#e9fbf0;color:#15803d;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;">Активен</span>`;
 
     el.innerHTML = `
