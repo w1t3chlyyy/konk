@@ -19,11 +19,14 @@ import psycopg2.extras
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
-# Telegram lets you set a secret token that it will echo back on every webhook
-# call in the `X-Telegram-Bot-Api-Secret-Token` header. Set it once with
-# setWebhook(..., secret_token=...) and put the same value here. Falls back to
-# CRON_SECRET if you don't want to manage a second value.
-WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", CRON_SECRET)
+# NOTE: this must be a *separate* value from CRON_SECRET. Telegram's webhook
+# secret_token is a different mechanism (it's echoed back in the
+# X-Telegram-Bot-Api-Secret-Token header only if you explicitly pass
+# secret_token= when calling setWebhook). If you don't set this env var, no
+# check is performed — which matches the plain `setWebhook?url=...` call in
+# the README. If you DO want this protection, set TELEGRAM_WEBHOOK_SECRET
+# AND re-run setWebhook with &secret_token=<same value>.
+WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 vercel_url = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") or os.environ.get("VERCEL_URL")
 default_miniapp_url = f"https://{vercel_url}" if vercel_url else "http://localhost:3000"
@@ -74,6 +77,22 @@ def ensure_admin_subscription(cur):
            values (%s, true, true, null)
            on conflict (user_id) do nothing""",
         (ADMIN_ID,),
+    )
+
+
+def ensure_schema_extensions(cur):
+    """Additive, idempotent schema patches so the app self-heals even if
+    sql/schema.sql in the repo hasn't been re-run in Supabase after an
+    update. Safe to run on every request (cheap no-ops once applied)."""
+    cur.execute("alter table condition_checks add column if not exists file_id text")
+    cur.execute(
+        """create table if not exists pending_screenshots (
+               user_id bigint primary key,
+               participant_id integer not null,
+               condition_id integer not null,
+               contest_id integer not null,
+               created_at timestamptz not null default now()
+           )"""
     )
 
 
@@ -161,6 +180,20 @@ def get_cached_bot_username(cur) -> str:
 def get_contest_share_link(cur, ref_code: str) -> str:
     uname = get_cached_bot_username(cur)
     return f"https://t.me/{uname}?start=c_{ref_code}"
+
+
+def condition_status_for_client(condition: dict, db_status: str | None) -> str:
+    """Maps the raw DB status of a condition_check row (or its absence) onto
+    the status vocabulary the Mini App front-end understands, so state
+    ('awaiting review', 'rejected') survives a page reload instead of only
+    existing as a one-off response to check_condition."""
+    if db_status == "approved":
+        return "approved"
+    if db_status == "rejected":
+        return "rejected"
+    if db_status == "pending" and condition["type"] == "manual_screenshot":
+        return "awaiting_screenshot"
+    return "pending"
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +421,7 @@ def process_api_request(method: str, query_string: str, body_bytes: bytes, heade
         with db() as conn:
             cur = conn.cursor()
             ensure_admin_subscription(cur)
+            ensure_schema_extensions(cur)
 
             if method == "GET":
                 return handle_get(cur, action, params, init_data, headers)
@@ -493,7 +527,7 @@ def handle_get(cur, action, params, init_data, headers) -> tuple[int, dict]:
                     "type": c["type"],
                     "description": c["description"],
                     "link": c["link"],
-                    "status": checks.get(c["id"], "pending"),
+                    "status": condition_status_for_client(c, checks.get(c["id"])),
                 }
                 for c in conds
             ],
@@ -555,11 +589,31 @@ def handle_post(cur, action, body, init_data, headers) -> tuple[int, dict]:
             )
         else:
             new_status = "awaiting_screenshot"
+            # Re-arm on every click: if this was previously 'rejected' (or is
+            # brand new) it goes back to 'pending' awaiting a fresh photo.
+            # An already-'approved' row is left untouched.
             cur.execute(
                 """insert into condition_checks (participant_id, condition_id, status)
                    values (%s, %s, 'pending')
-                   on conflict (participant_id, condition_id) do nothing""",
+                   on conflict (participant_id, condition_id)
+                   do update set status = case
+                       when condition_checks.status = 'approved' then 'approved'
+                       else 'pending'
+                   end""",
                 (pid, cid),
+            )
+            # Remember which (participant, condition) this user's *next*
+            # photo message in the bot chat belongs to — this is what the
+            # webhook photo handler below reads to know who to notify.
+            cur.execute(
+                """insert into pending_screenshots (user_id, participant_id, condition_id, contest_id)
+                   values (%s, %s, %s, %s)
+                   on conflict (user_id) do update set
+                       participant_id = excluded.participant_id,
+                       condition_id = excluded.condition_id,
+                       contest_id = excluded.contest_id,
+                       created_at = now()""",
+                (uid, pid, cid, participant["contest_id"]),
             )
 
         cur.execute("select count(*) as n from conditions where contest_id = %s", (participant["contest_id"],))
@@ -667,7 +721,10 @@ def handle_post(cur, action, body, init_data, headers) -> tuple[int, dict]:
 
 
 def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict]:
-    # Verify this actually came from Telegram, not a random POST.
+    # Only enforced if TELEGRAM_WEBHOOK_SECRET is explicitly set AND you
+    # re-ran setWebhook with a matching &secret_token=. Do NOT default this
+    # to CRON_SECRET — that silently blackholes every single update, since
+    # Telegram will never send a header value it was never told to send.
     if WEBHOOK_SECRET:
         got = headers.get("x-telegram-bot-api-secret-token", "")
         if got != WEBHOOK_SECRET:
@@ -688,6 +745,80 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
         chat_id = cb_message.get("chat", {}).get("id")
         cb_data = callback_query.get("data", "")
 
+        # --- Screenshot review (any contest owner can review their own
+        # contest's submissions, not just the global bot owner) ---
+        if cb_data.startswith("scr_ok:") or cb_data.startswith("scr_no:"):
+            approve = cb_data.startswith("scr_ok:")
+            check_id = int(cb_data.split(":", 1)[1])
+
+            cur.execute(
+                """select cc.id, cc.participant_id, p.contest_id, p.user_id as participant_user_id,
+                          c.owner_user_id, c.title as contest_title
+                   from condition_checks cc
+                   join participants p on p.id = cc.participant_id
+                   join contests c on c.id = p.contest_id
+                   where cc.id = %s""",
+                (check_id,),
+            )
+            row = cur.fetchone()
+
+            send_telegram_api("answerCallbackQuery", {"callback_query_id": cb_id})
+
+            if not row or (str(user_id) != str(row["owner_user_id"]) and str(user_id) != str(ADMIN_ID)):
+                return 200, {"ok": True}
+
+            new_status = "approved" if approve else "rejected"
+            cur.execute(
+                "update condition_checks set status = %s, reviewed_at = now() where id = %s",
+                (new_status, check_id),
+            )
+
+            participant_id = row["participant_id"]
+            cur.execute("select count(*) as n from conditions where contest_id = %s", (row["contest_id"],))
+            total = cur.fetchone()["n"]
+            cur.execute(
+                "select count(*) as n from condition_checks where participant_id = %s and status = 'approved'",
+                (participant_id,),
+            )
+            approved_n = cur.fetchone()["n"]
+            confirmed = total > 0 and approved_n >= total
+            if confirmed:
+                cur.execute(
+                    "update participants set status = 'confirmed', confirmed_at = now() "
+                    "where id = %s and status != 'confirmed'",
+                    (participant_id,),
+                )
+
+            verdict_emoji = "✅" if approve else "❌"
+            verdict_text = "подтверждён" if approve else "отклонён"
+            try:
+                send_telegram_api("editMessageCaption", {
+                    "chat_id": chat_id,
+                    "message_id": cb_message.get("message_id"),
+                    "caption": (cb_message.get("caption") or "") + f"\n\n{verdict_emoji} Скриншот {verdict_text}",
+                    "parse_mode": "HTML",
+                })
+            except Exception as e:
+                print(f"[scr_review] editMessageCaption failed: {e}")
+
+            notify_text = (
+                f"✅ <b>Ваш скриншот по конкурсу «{row['contest_title']}» подтверждён!</b>"
+                if approve else
+                f"❌ <b>Скриншот по конкурсу «{row['contest_title']}» отклонён организатором.</b>\n\n"
+                f"Откройте чек-лист в приложении и отправьте другой скриншот."
+            )
+            send_telegram_api("sendMessage", {
+                "chat_id": row["participant_user_id"], "text": notify_text, "parse_mode": "HTML",
+            })
+            if confirmed:
+                send_telegram_api("sendMessage", {
+                    "chat_id": row["participant_user_id"],
+                    "text": "🎉 <b>Все условия выполнены — вы участвуете в розыгрыше!</b>",
+                    "parse_mode": "HTML",
+                })
+            return 200, {"ok": True}
+
+        # --- Bot-owner-only settings callbacks (unchanged behaviour) ---
         send_telegram_api("answerCallbackQuery", {"callback_query_id": cb_id})
 
         if str(user_id) != str(ADMIN_ID):
@@ -864,8 +995,60 @@ def handle_telegram_webhook(cur, update: dict, headers: dict) -> tuple[int, dict
             reply_text = "⛔ Данная команда доступна только администратору бота."
 
     elif photo:
-        reply_text = "📸 <b>Скриншот получен!</b>\n\nОн передан организаторам на ручную проверку."
-        reply_markup = {"inline_keyboard": [[{"text": "🔍 Открыть чек-лист", "web_app": {"url": f"{base_miniapp}/"}}]]}
+        # Look up which (participant, condition) this user last clicked
+        # "Выполнить" for in the Mini App checklist. Without this we have no
+        # way to know who should review the photo — this lookup + forward is
+        # the fix for "screenshots never reach the admin".
+        cur.execute("select * from pending_screenshots where user_id = %s", (user_id,))
+        pending = cur.fetchone()
+
+        if not pending:
+            reply_text = (
+                "📸 <b>Скриншот получен!</b>\n\nНо я не понял, к какому условию он относится — "
+                "откройте чек-лист конкурса, нажмите «Выполнить» на нужном пункте и пришлите фото ещё раз."
+            )
+            reply_markup = {"inline_keyboard": [[{"text": "🔍 Открыть чек-лист", "web_app": {"url": f"{base_miniapp}/"}}]]}
+        else:
+            file_id = photo[-1]["file_id"]
+            cur.execute(
+                """update condition_checks set file_id = %s, status = 'pending', reviewed_at = null
+                   where participant_id = %s and condition_id = %s
+                   returning id""",
+                (file_id, pending["participant_id"], pending["condition_id"]),
+            )
+            check_row = cur.fetchone()
+            cur.execute("delete from pending_screenshots where user_id = %s", (user_id,))
+
+            cur.execute("select * from contests where id = %s", (pending["contest_id"],))
+            contest = cur.fetchone()
+            cur.execute("select * from conditions where id = %s", (pending["condition_id"],))
+            condition = cur.fetchone()
+
+            if check_row and contest and condition:
+                organizer_id = contest["owner_user_id"]
+                username_part = f"@{from_user['username']}" if from_user.get("username") else first_name
+                caption = (
+                    f"🕵️ <b>Новый скриншот на проверку</b>\n\n"
+                    f"Конкурс: <b>{contest['title']}</b>\n"
+                    f"Условие: {condition['description']}\n"
+                    f"Участник: {username_part} (id {user_id})"
+                )
+                send_telegram_api("sendPhoto", {
+                    "chat_id": organizer_id,
+                    "photo": file_id,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                    "reply_markup": {"inline_keyboard": [[
+                        {"text": "✅ Подтвердить", "callback_data": f"scr_ok:{check_row['id']}"},
+                        {"text": "❌ Отклонить", "callback_data": f"scr_no:{check_row['id']}"},
+                    ]]},
+                })
+
+            reply_text = (
+                "📸 <b>Скриншот отправлен организатору на проверку!</b>\n\n"
+                "Статус обновится в чек-листе, как только его проверят."
+            )
+            reply_markup = {"inline_keyboard": [[{"text": "🔍 Открыть чек-лист", "web_app": {"url": f"{base_miniapp}/"}}]]}
 
     else:
         reply_text = "👋 Чтобы принять участие в конкурсе или управлять розыгрышами, откройте приложение:"
